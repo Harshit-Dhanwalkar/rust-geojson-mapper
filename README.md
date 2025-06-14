@@ -63,18 +63,21 @@ For other operating systems, please refer to the `proj-sys` crate documentation 
 
 Follow these steps to get the project running and generate your world map:
 
-1. Clone the repository (including submodules):
-   The geographical data is included as a Git submodule.
+1. Clone the repository:
 
    ```bash
    git clone https://github.com/Harshit-Dhanwalkar/rust-geojson-mapper.git
    cd rust-geojson-mapper
-   git submodule update --init --recursive
    ```
 
-   This will clone the `natural-earth-vector` repository into your `data/natural-earth-vector-master` directory.
+2. Download GeoJSON Data:
+   This application requires GeoJSON data to plot. You can obtain a collection of world geographical data from the Natural Earth project.
+   Download the geojson.zip file directly from the geojson directory of the natural-earth-vector repository:
+   `https://github.com/nvkelso/natural-earth-vector/tree/master/geojson`
 
-2. Build and Run:
+   After downloading, extract the contents of geojson.zip into a new directory named data/geojson/ in the root of this project.
+
+3. Build and Run:
    Navigate to the project's root directory (rust-geojson-mapper/) and execute:
 
    ```bash
@@ -82,9 +85,7 @@ Follow these steps to get the project running and generate your world map:
     cargo run
    ```
 
-   This command will compile the project and then run the executable.
-
-Upon successful execution, a `world_coastlines.png` image file will be generated in your project's root directory.
+   This command will compile the project and then run the executable. The application will then list available GeoJSON files and prompt you to choose one to plot. Generated `.png` image files will be saved in the `output/` directory.
 
 ---
 
@@ -98,6 +99,12 @@ The project relies on the following Rust crates (as defined in Cargo.toml):
     `approx = "0.5"`: A crate for approximate float comparisons (included, but not directly used in the current map drawing logic).
     `geojson = "0.24"`: A library for working with GeoJSON data.
     `serde_json = "1.0"`: A JSON serialization/deserialization library (a dependency of `geojson`).
+
+---
+
+## Data Source Acknowledgement
+
+The GeoJSON data used in this project is sourced from the Natural Earth project, specifically from the repository maintained by [nvkelso](https://github.com/nvkelso).
 
 # License
 
