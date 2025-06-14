@@ -1,2 +1,80 @@
-# rust-geojson-mapper
-A Rust application for visualizing world coastlines from GeoJSON data using the plotters library.
+# Rust World Map Plotter
+
+This repository contains a Rust application designed to visualize world coastlines. It leverages the `plotters` library for generating image output and the `geojson` crate for parsing geographical data from GeoJSON files. It's built to demonstrate basic geographical plotting in Rust.
+
+## Features
+
+- Reads world coastline data from a standard GeoJSON file.
+- Plots coastlines on a 2D Cartesian chart, representing longitude and latitude.
+- Generates a PNG image of the world map.
+- Configurable map title and margins.
+- Basic error handling for GeoJSON file operations.
+
+## Example
+
+Here's an example of the generated output:
+
+![Example](world_coastlines.png)
+
+## Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+- **Rust and Cargo:** You can install them by following the instructions on [rust-lang.org](https://www.rust-lang.org/tools/install).
+
+### System Dependencies
+
+This project uses the `proj-sys` crate, which is a low-level binding to the PROJ C library. You will need to install PROJ development files and a C/C++ compiler on your system.
+
+**For Debian/Ubuntu-based systems (e.g., Pop!\_OS):**
+
+```bash
+sudo apt update
+sudo apt install build-essential libproj-dev proj-bin clang libclang-dev
+```
+
+For other operating systems, please refer to the `proj-sys` crate documentation or your system's package manager for equivalent packages.
+
+## Setup and Usage
+
+Follow these steps to get the project running and generate your world map:
+
+1. Clone the repository (including submodules):
+   The geographical data is included as a Git submodule.
+
+   ```bash
+   git clone https://github.com/Harshit-Dhanwalkar/rust-geojson-mapper.git
+   cd rust-geojson-mapper
+   git submodule update --init --recursive
+   ```
+
+   This will clone the `natural-earth-vector` repository into your `data/natural-earth-vector-master` directory.
+
+2. Build and Run:
+   Navigate to the project's root directory (rust-geojson-mapper/) and execute:
+
+   ```bash
+    cargo build
+    cargo run
+   ```
+
+   This command will compile the project and then run the executable.
+
+Upon successful execution, a `world_coastlines.png` image file will be generated in your project's root directory.
+
+---
+
+## Dependencies
+
+The project relies on the following Rust crates (as defined in Cargo.toml):
+
+    `plotters = "0.3"`: A Rust drawing library for data plotting.
+    `proj = { version = "0.30.0" }`: Rust bindings for PROJ (a cartographic projections library).
+    `proj-sys = { version = "0.26.0" }`: System bindings for PROJ.
+    `approx = "0.5"`: A crate for approximate float comparisons (included, but not directly used in the current map drawing logic).
+    `geojson = "0.24"`: A library for working with GeoJSON data.
+    `serde_json = "1.0"`: A JSON serialization/deserialization library (a dependency of `geojson`).
+
+# License
+
+This project is open-source and available under the [MIT License](LICENSE).

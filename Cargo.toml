@@ -1,0 +1,13 @@
+# Cargo.toml
+[package]
+name = "plots"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+plotters = "0.3"
+proj = { version = "0.30.0" }
+proj-sys = { version = "0.26.0" }
+approx = "0.5"
+geojson = "0.24"
+serde_json = "1.0"
