@@ -1,3 +1,4 @@
+// main.rs for rust-geojson-mapper with ncurses TUI
 use geojson::{GeoJson, Value};
 use plotters::prelude::*;
 use std::error::Error;
@@ -159,7 +160,17 @@ impl Ui {
 
         mv(pos.y, pos.x);
         attron(COLOR_PAIR(pair));
-        addstr(text);
+        // Ensure text is truncated if it's too long for the width
+        let truncated_text = if text.len() > width as usize {
+            &text[0..width as usize]
+        } else {
+            text
+        };
+        addstr(truncated_text);
+        // Clear the rest of the line to prevent artifacts from previous longer lines
+        for _ in truncated_text.len()..width as usize {
+            addch(' ' as chtype);
+        }
         attroff(COLOR_PAIR(pair));
 
         layout.add_widget(Vec2::new(width, 1));
@@ -310,6 +321,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut ui = Ui::default();
     let mut selected_file_index: usize = 0;
+    let mut scroll_offset: usize = 0; // New: Tracks the top-most visible item
     let mut quit = false;
     let mut notification = String::from("Select a GeoJSON file to plot:");
 
@@ -321,21 +333,57 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut y = 0;
         getmaxyx(stdscr(), &mut y, &mut x); // Get current terminal dimensions
 
+        // Calculate available rows for the file list
+        let header_rows = 2; // Notification + first spacer
+        let footer_rows = 2; // Second spacer + instructions
+        let title_row = 1; // "Available GeoJSON files:" row
+        let fixed_ui_rows = header_rows + footer_rows + title_row;
+
+        let max_visible_items_in_list = cmp::max(0, y - fixed_ui_rows) as usize;
+
+        // Adjust scroll_offset to keep selected_file_index in view
+        if selected_file_index >= scroll_offset + max_visible_items_in_list
+            && max_visible_items_in_list > 0
+        {
+            scroll_offset = selected_file_index - max_visible_items_in_list + 1;
+        }
+        if selected_file_index < scroll_offset {
+            scroll_offset = selected_file_index;
+        }
+        // Ensure scroll_offset doesn't go out of bounds at the end of the list
+        if geojson_files.len() <= max_visible_items_in_list {
+            scroll_offset = 0; // All files fit, no scrolling needed
+        } else if scroll_offset > geojson_files.len() - max_visible_items_in_list {
+            scroll_offset = geojson_files.len() - max_visible_items_in_list;
+        }
+
         ui.begin(Vec2::new(0, 0), LayoutKind::Vert);
         {
             ui.label_fixed_width(&notification, x, REGULAR_PAIR);
             ui.label_fixed_width("", x, REGULAR_PAIR); // Spacer
 
             ui.label_fixed_width("Available GeoJSON files:", x, REGULAR_PAIR);
-            // Display file list
-            for (i, file_name) in geojson_files.iter().enumerate() {
+
+            // Display visible file list items
+            // Loop from scroll_offset up to max_visible_items_in_list
+            let end_display_index = cmp::min(
+                scroll_offset + max_visible_items_in_list,
+                geojson_files.len(),
+            );
+
+            for i in scroll_offset..end_display_index {
+                let file_name = &geojson_files[i];
                 let display_text = format!("{}. {}", i + 1, file_name);
                 let pair = if i == selected_file_index {
                     HIGHLIGHT_PAIR
                 } else {
                     REGULAR_PAIR
                 };
-                ui.label_fixed_width(&display_text, x / 2, pair); // Adjust width as needed
+                ui.label_fixed_width(&display_text, x / 2, pair); // Use x/2 for width to prevent wrapping
+            }
+            // Fill remaining lines with empty spaces if there are fewer files than max_visible_items
+            for _ in (end_display_index - scroll_offset)..max_visible_items_in_list {
+                ui.label_fixed_width("", x / 2, REGULAR_PAIR);
             }
 
             ui.label_fixed_width("", x, REGULAR_PAIR); // Spacer
