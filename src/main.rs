@@ -321,7 +321,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut ui = Ui::default();
     let mut selected_file_index: usize = 0;
-    let mut scroll_offset: usize = 0; // New: Tracks the top-most visible item
+    let mut scroll_offset: usize = 0;
     let mut quit = false;
     let mut notification = String::from("Select a GeoJSON file to plot:");
 
