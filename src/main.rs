@@ -1,17 +1,24 @@
-// main.rs for rust-geojson-mapper with ncurses TUI
-use geojson::{GeoJson, Value};
+use geojson::{GeoJson, Value}; // Removed unused Feature, Geometry
 use plotters::prelude::*;
 use std::error::Error;
 use std::fs;
-use std::io;
+use std::io::{self};
 use std::path::{Path, PathBuf};
 
 use ncurses::*;
 use std::cmp;
+// use std::env;
 use std::process;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering}; // For exit
 
+// use std::fs::File;
+// use std::io::{self, BufRead, ErrorKind, Write};
 use std::ops::{Add, Mul};
+// use std::process;
+// use std::sync::atomic::{AtomicBool, Ordering};
+//
+// #[cfg(not(unix))]
+// compile_error! {"Windows is not supported right now"}
 
 // SIGINT Handler (Ctrl+C)
 static CTRLC: AtomicBool = AtomicBool::new(false);
@@ -35,12 +42,6 @@ fn poll_signal() -> bool {
 
 const REGULAR_PAIR: i16 = 0;
 const HIGHLIGHT_PAIR: i16 = 1;
-
-// Define key constants for pattern matching
-const KEY_CHAR_J: i32 = 'j' as i32;
-const KEY_CHAR_K: i32 = 'k' as i32;
-const KEY_CHAR_NEWLINE: i32 = '\n' as i32;
-const KEY_CHAR_Q: i32 = 'q' as i32;
 
 #[derive(Default, Copy, Clone)]
 struct Vec2 {
@@ -160,17 +161,7 @@ impl Ui {
 
         mv(pos.y, pos.x);
         attron(COLOR_PAIR(pair));
-        // Ensure text is truncated if it's too long for the width
-        let truncated_text = if text.len() > width as usize {
-            &text[0..width as usize]
-        } else {
-            text
-        };
-        addstr(truncated_text);
-        // Clear the rest of the line to prevent artifacts from previous longer lines
-        for _ in truncated_text.len()..width as usize {
-            addch(' ' as chtype);
-        }
+        addstr(text);
         attroff(COLOR_PAIR(pair));
 
         layout.add_widget(Vec2::new(width, 1));
@@ -325,6 +316,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut quit = false;
     let mut notification = String::from("Select a GeoJSON file to plot:");
 
+    let help_keybinds = vec![
+        "J/K or Arrow Keys: Navigate file list",
+        "Enter: Select highlighted file to plot",
+        "Q: Quit the application",
+    ];
+
     // Main TUI Loop
     while !quit && !poll_signal() {
         erase(); // Clear screen
@@ -342,6 +339,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         let max_visible_items_in_list = cmp::max(0, y - fixed_ui_rows) as usize;
 
         // Adjust scroll_offset to keep selected_file_index in view
+        if selected_file_index >= geojson_files.len() {
+            selected_file_index = cmp::max(0, geojson_files.len().saturating_sub(1));
+        }
+
         if selected_file_index >= scroll_offset + max_visible_items_in_list
             && max_visible_items_in_list > 0
         {
@@ -350,11 +351,57 @@ fn main() -> Result<(), Box<dyn Error>> {
         if selected_file_index < scroll_offset {
             scroll_offset = selected_file_index;
         }
-        // Ensure scroll_offset doesn't go out of bounds at the end of the list
         if geojson_files.len() <= max_visible_items_in_list {
             scroll_offset = 0; // All files fit, no scrolling needed
-        } else if scroll_offset > geojson_files.len() - max_visible_items_in_list {
-            scroll_offset = geojson_files.len() - max_visible_items_in_list;
+        } else if scroll_offset
+            > geojson_files
+                .len()
+                .saturating_sub(max_visible_items_in_list)
+        {
+            scroll_offset = geojson_files
+                .len()
+                .saturating_sub(max_visible_items_in_list);
+        }
+
+        let main_content_width = x;
+        let left_panel_width = main_content_width / 2;
+        let right_panel_width = main_content_width - left_panel_width;
+
+        let available_content_rows = max_visible_items_in_list + 1; // +1 for "Available GeoJSON files:" title
+
+        let section_title_rows = 1;
+        let num_right_sections = 4;
+        let total_right_section_title_rows = section_title_rows * num_right_sections;
+
+        let mut base_section_content_height = 0;
+        if available_content_rows > total_right_section_title_rows {
+            base_section_content_height =
+                (available_content_rows - total_right_section_title_rows) / num_right_sections;
+        }
+        let remaining_rows_for_last_section =
+            (available_content_rows - total_right_section_title_rows) % num_right_sections;
+
+        // --- File Information Data Retrieval ---
+        let mut file_info_lines: Vec<String> = Vec::new();
+        if let Some(chosen_filename_str) = geojson_files.get(selected_file_index) {
+            let full_filepath = PathBuf::from(GEOJSON_DIR).join(chosen_filename_str);
+            if let Ok(metadata) = fs::metadata(&full_filepath) {
+                // File size
+                file_info_lines.push(format!("Size: {} KB", metadata.len() / 1024));
+
+                // Last modified time
+                if let Ok(time) = metadata.modified() {
+                    let datetime: chrono::DateTime<chrono::Local> = time.into();
+                    file_info_lines
+                        .push(format!("Modified: {}", datetime.format("%Y-%m-%d %H:%M")));
+                } else {
+                    file_info_lines.push(String::from("Modified: N/A"));
+                }
+            } else {
+                file_info_lines.push(String::from("Info: Not available"));
+            }
+        } else {
+            file_info_lines.push(String::from("Info: No file selected"));
         }
 
         ui.begin(Vec2::new(0, 0), LayoutKind::Vert);
@@ -362,29 +409,105 @@ fn main() -> Result<(), Box<dyn Error>> {
             ui.label_fixed_width(&notification, x, REGULAR_PAIR);
             ui.label_fixed_width("", x, REGULAR_PAIR); // Spacer
 
-            ui.label_fixed_width("Available GeoJSON files:", x, REGULAR_PAIR);
+            ui.begin_layout(LayoutKind::Horz); // Start Horizontal split for main content
+            {
+                // --- Left Panel: GeoJSON File List ---
+                ui.begin_layout(LayoutKind::Vert);
+                {
+                    ui.label_fixed_width(
+                        "Available GeoJSON files:",
+                        left_panel_width,
+                        REGULAR_PAIR,
+                    );
+                    // Display visible file list items
+                    let end_display_index = cmp::min(
+                        scroll_offset + max_visible_items_in_list,
+                        geojson_files.len(),
+                    );
+                    for i in scroll_offset..end_display_index {
+                        let file_name = &geojson_files[i];
+                        let display_text = format!("{}. {}", i + 1, file_name);
+                        let pair = if i == selected_file_index {
+                            HIGHLIGHT_PAIR
+                        } else {
+                            REGULAR_PAIR
+                        };
+                        ui.label_fixed_width(&display_text, left_panel_width, pair);
+                    }
+                    for _ in (end_display_index - scroll_offset)..max_visible_items_in_list {
+                        ui.label_fixed_width("", left_panel_width, REGULAR_PAIR);
+                    }
+                }
+                ui.end_layout(); // End Left Panel
 
-            // Display visible file list items
-            // Loop from scroll_offset up to max_visible_items_in_list
-            let end_display_index = cmp::min(
-                scroll_offset + max_visible_items_in_list,
-                geojson_files.len(),
-            );
+                // --- Right Panel ---
+                ui.begin_layout(LayoutKind::Vert);
+                {
+                    // Section 1: Detailed File Information
+                    ui.begin_layout(LayoutKind::Vert);
+                    {
+                        ui.label_fixed_width(
+                            "--- File Information ---",
+                            right_panel_width,
+                            REGULAR_PAIR,
+                        );
+                        for line in file_info_lines.iter() {
+                            ui.label_fixed_width(line, right_panel_width, REGULAR_PAIR);
+                        }
+                        // Fill remaining lines for this section's content
+                        let lines_printed = file_info_lines.len();
+                        let lines_to_fill =
+                            cmp::max(0, base_section_content_height.saturating_sub(lines_printed));
+                        for _ in 0..lines_to_fill {
+                            ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
+                        }
+                    }
+                    ui.end_layout();
 
-            for i in scroll_offset..end_display_index {
-                let file_name = &geojson_files[i];
-                let display_text = format!("{}. {}", i + 1, file_name);
-                let pair = if i == selected_file_index {
-                    HIGHLIGHT_PAIR
-                } else {
-                    REGULAR_PAIR
-                };
-                ui.label_fixed_width(&display_text, x / 2, pair); // Use x/2 for width to prevent wrapping
+                    // // Section 2: Plotting Configuration Options
+                    // ui.begin_layout(LayoutKind::Vert);
+                    // {
+                    //     ui.label_fixed_width(
+                    //         "--- Plotting Options ---",
+                    //         right_panel_width,
+                    //         REGULAR_PAIR,
+                    //     );
+                    //     for _ in 0..(base_section_content_height + remaining_rows_for_last_section)
+                    //     {
+                    //         ui.label_fixed_width(
+                    //             "- Placeholder Line for Options -",
+                    //             right_panel_width,
+                    //             REGULAR_PAIR,
+                    //         );
+                    //     }
+                    // }
+                    // ui.end_layout();
+
+                    // Section 2: Dynamic Help / Keybinds
+                    ui.begin_layout(LayoutKind::Vert);
+                    {
+                        ui.label_fixed_width(
+                            "--- Help / Keybinds ---",
+                            right_panel_width,
+                            REGULAR_PAIR,
+                        );
+                        // Display help information
+                        for line in help_keybinds.iter() {
+                            ui.label_fixed_width(line, right_panel_width, REGULAR_PAIR);
+                        }
+                        // Fill remaining lines for this section's content
+                        let lines_printed = help_keybinds.len();
+                        let lines_to_fill =
+                            cmp::max(0, base_section_content_height.saturating_sub(lines_printed));
+                        for _ in 0..lines_to_fill {
+                            ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
+                        }
+                    }
+                    ui.end_layout();
+                }
+                ui.end_layout(); // End Right Panel
             }
-            // Fill remaining lines with empty spaces if there are fewer files than max_visible_items
-            for _ in (end_display_index - scroll_offset)..max_visible_items_in_list {
-                ui.label_fixed_width("", x / 2, REGULAR_PAIR);
-            }
+            ui.end_layout(); // End Horizontal split for main content
 
             ui.label_fixed_width("", x, REGULAR_PAIR); // Spacer
             ui.label_fixed_width(
@@ -400,27 +523,41 @@ fn main() -> Result<(), Box<dyn Error>> {
         let key = getch(); // Get user input
         if key != ERR {
             ui.key = Some(key);
-            notification.clear(); // Clear notification on new input
+            notification.clear();
 
             match key {
                 // Navigation
-                constants::KEY_DOWN | KEY_CHAR_J => {
+                constants::KEY_DOWN => {
                     if selected_file_index + 1 < geojson_files.len() {
                         selected_file_index += 1;
                     }
                 }
-                constants::KEY_UP | KEY_CHAR_K => {
+                val if val == 'j' as i32 => {
+                    if selected_file_index + 1 < geojson_files.len() {
+                        selected_file_index += 1;
+                    }
+                }
+                constants::KEY_UP => {
+                    if selected_file_index > 0 {
+                        selected_file_index -= 1;
+                    }
+                }
+                val if val == 'k' as i32 => {
                     if selected_file_index > 0 {
                         selected_file_index -= 1;
                     }
                 }
                 // Select file
-                constants::KEY_ENTER | KEY_CHAR_NEWLINE => {
+                constants::KEY_ENTER => {
+                    quit = true; // Exit loop to process selection
+                    notification = format!("Selected: {}", geojson_files[selected_file_index]);
+                }
+                val if val == '\n' as i32 => {
                     quit = true; // Exit loop to process selection
                     notification = format!("Selected: {}", geojson_files[selected_file_index]);
                 }
                 // Quit
-                KEY_CHAR_Q => {
+                val if val == 'q' as i32 => {
                     quit = true;
                     notification = String::from("Exiting...");
                 }
@@ -432,7 +569,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // --- Plotting Logic (after selection) ---
+    // --- Plotting Logic ---
     endwin(); // End ncurses mode before plotting
 
     if !CTRLC.load(Ordering::Relaxed) && ui.key.map(|k| k as u8 as char) != Some('q') {
