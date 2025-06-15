@@ -517,6 +517,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ncurses"
+version = "6.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbd71afa95710e841d173521e8483e764004eb332bdf47bd01d00f568688027f"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -569,6 +580,8 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "geojson",
+ "libc",
+ "ncurses",
  "plotters",
  "proj",
  "proj-sys",
