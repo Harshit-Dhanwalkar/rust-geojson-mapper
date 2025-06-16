@@ -1,5 +1,7 @@
-use geojson::{GeoJson, Value}; // Removed unused Feature, Geometry
+// main.rs for rust-geojson-mapper with ncurses TUI
+use geojson::{GeoJson, Value};
 use plotters::prelude::*;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
 use std::io::{self};
@@ -7,20 +9,9 @@ use std::path::{Path, PathBuf};
 
 use ncurses::*;
 use std::cmp;
-// use std::env;
 use std::process;
-use std::sync::atomic::{AtomicBool, Ordering}; // For exit
+use std::sync::atomic::{AtomicBool, Ordering};
 
-// use std::fs::File;
-// use std::io::{self, BufRead, ErrorKind, Write};
-use std::ops::{Add, Mul};
-// use std::process;
-// use std::sync::atomic::{AtomicBool, Ordering};
-//
-// #[cfg(not(unix))]
-// compile_error! {"Windows is not supported right now"}
-
-// SIGINT Handler (Ctrl+C)
 static CTRLC: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn callback(_signum: i32) {
@@ -38,7 +29,6 @@ fn init_signal_handler() {
 fn poll_signal() -> bool {
     CTRLC.swap(false, Ordering::Relaxed)
 }
-// //////////////////////
 
 const REGULAR_PAIR: i16 = 0;
 const HIGHLIGHT_PAIR: i16 = 1;
@@ -49,7 +39,7 @@ struct Vec2 {
     y: i32,
 }
 
-impl Add for Vec2 {
+impl std::ops::Add for Vec2 {
     type Output = Vec2;
 
     fn add(self, rhs: Vec2) -> Vec2 {
@@ -60,7 +50,7 @@ impl Add for Vec2 {
     }
 }
 
-impl Mul for Vec2 {
+impl std::ops::Mul for Vec2 {
     type Output = Vec2;
 
     fn mul(self, rhs: Vec2) -> Vec2 {
@@ -242,7 +232,6 @@ impl Ui {
     }
 }
 
-// Global constants
 const GEOJSON_DIR: &str = "data/geojson/";
 const OUTPUT_DIR: &str = "output/";
 
@@ -251,6 +240,16 @@ fn read_geojson(filepath: &str) -> Result<GeoJson, Box<dyn Error>> {
     let reader = io::BufReader::new(file);
     let geojson = GeoJson::from_reader(reader)?;
     Ok(geojson)
+}
+
+#[derive(Default, Clone)]
+struct GeoJsonInfo {
+    file_size_kb: u64,
+    modified_time: String,
+    feature_count: usize,
+    geometry_counts: HashMap<String, usize>,
+    bbox: Option<[f64; 4]>, // [min_lon, min_lat, max_lon, max_lat]
+    parse_error: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -310,6 +309,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     init_pair(REGULAR_PAIR, COLOR_WHITE, COLOR_BLACK);
     init_pair(HIGHLIGHT_PAIR, COLOR_BLACK, COLOR_WHITE);
 
+    // Define a palette of colors for plotting
+    let plot_colors = [
+        RGBColor(0, 0, 0),     // Black
+        RGBColor(255, 0, 0),   // Red
+        RGBColor(0, 255, 0),   // Green
+        RGBColor(0, 0, 255),   // Blue
+        RGBColor(255, 255, 0), // Yellow
+        RGBColor(255, 0, 255), // Magenta
+        RGBColor(0, 255, 255), // Cyan
+    ];
+    let mut current_color_index = 0;
+
     let mut ui = Ui::default();
     let mut selected_file_index: usize = 0;
     let mut scroll_offset: usize = 0;
@@ -319,8 +330,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let help_keybinds = vec![
         "J/K or Arrow Keys: Navigate file list",
         "Enter: Select highlighted file to plot",
+        "C: Change plot color",
         "Q: Quit the application",
     ];
+
+    // Caching for GeoJSON metadata
+    let mut cached_geojson_info: Vec<Option<GeoJsonInfo>> = vec![None; geojson_files.len()];
+    let mut previous_selected_file_index: usize = selected_file_index;
 
     // Main TUI Loop
     while !quit && !poll_signal() {
@@ -333,7 +349,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Calculate available rows for the file list
         let header_rows = 2; // Notification + first spacer
         let footer_rows = 2; // Second spacer + instructions
-        let title_row = 1; // "Available GeoJSON files:" row
+        let title_row = 1; // "Available GeoJSON files:" row, consumed by the main content area title
         let fixed_ui_rows = header_rows + footer_rows + title_row;
 
         let max_visible_items_in_list = cmp::max(0, y - fixed_ui_rows) as usize;
@@ -351,6 +367,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         if selected_file_index < scroll_offset {
             scroll_offset = selected_file_index;
         }
+        // Ensure scroll_offset doesn't go out of bounds at the end of the list
         if geojson_files.len() <= max_visible_items_in_list {
             scroll_offset = 0; // All files fit, no scrolling needed
         } else if scroll_offset
@@ -363,14 +380,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .saturating_sub(max_visible_items_in_list);
         }
 
-        let main_content_width = x;
+        let main_content_width = x; // Total width for the main content area
         let left_panel_width = main_content_width / 2;
-        let right_panel_width = main_content_width - left_panel_width;
+        let right_panel_width = main_content_width - left_panel_width; // Right panel takes remaining width
 
         let available_content_rows = max_visible_items_in_list + 1; // +1 for "Available GeoJSON files:" title
 
-        let section_title_rows = 1;
-        let num_right_sections = 4;
+        let section_title_rows = 1; // Each section title takes 1 row
+        let num_right_sections = 3;
         let total_right_section_title_rows = section_title_rows * num_right_sections;
 
         let mut base_section_content_height = 0;
@@ -381,27 +398,163 @@ fn main() -> Result<(), Box<dyn Error>> {
         let remaining_rows_for_last_section =
             (available_content_rows - total_right_section_title_rows) % num_right_sections;
 
-        // --- File Information Data Retrieval ---
-        let mut file_info_lines: Vec<String> = Vec::new();
-        if let Some(chosen_filename_str) = geojson_files.get(selected_file_index) {
-            let full_filepath = PathBuf::from(GEOJSON_DIR).join(chosen_filename_str);
-            if let Ok(metadata) = fs::metadata(&full_filepath) {
-                // File size
-                file_info_lines.push(format!("Size: {} KB", metadata.len() / 1024));
-
-                // Last modified time
-                if let Ok(time) = metadata.modified() {
-                    let datetime: chrono::DateTime<chrono::Local> = time.into();
-                    file_info_lines
-                        .push(format!("Modified: {}", datetime.format("%Y-%m-%d %H:%M")));
+        // --- File Information & Metadata Retrieval ---
+        let current_geojson_info: GeoJsonInfo;
+        if selected_file_index != previous_selected_file_index
+            || cached_geojson_info[selected_file_index].is_none()
+        {
+            // Load and process only if index changed or not cached yet
+            let mut info = GeoJsonInfo::default();
+            if let Some(chosen_filename_str) = geojson_files.get(selected_file_index) {
+                let full_filepath = PathBuf::from(GEOJSON_DIR).join(chosen_filename_str);
+                if let Ok(metadata) = fs::metadata(&full_filepath) {
+                    info.file_size_kb = metadata.len() / 1024;
+                    if let Ok(time) = metadata.modified() {
+                        let datetime: chrono::DateTime<chrono::Local> = time.into();
+                        info.modified_time = format!("{}", datetime.format("%Y-%m-%d %H:%M"));
+                    } else {
+                        info.modified_time = String::from("N/A");
+                    }
                 } else {
-                    file_info_lines.push(String::from("Modified: N/A"));
+                    info.parse_error = Some(String::from("File info: Not available"));
+                }
+
+                match read_geojson(
+                    full_filepath
+                        .to_str()
+                        .expect("Failed to convert path to string"),
+                ) {
+                    Ok(geojson) => {
+                        let mut min_lon = f64::MAX;
+                        let mut min_lat = f64::MAX;
+                        let mut max_lon = f64::MIN;
+                        let mut max_lat = f64::MIN;
+
+                        let mut process_geometry_for_info = |geometry: &geojson::Geometry| {
+                            let geom_type = geometry.value.type_name().to_string();
+                            *info.geometry_counts.entry(geom_type).or_insert(0) += 1;
+
+                            match &geometry.value {
+                                Value::Point(c) => {
+                                    min_lon = min_lon.min(c[0]);
+                                    min_lat = min_lat.min(c[1]);
+                                    max_lon = max_lon.max(c[0]);
+                                    max_lat = max_lat.max(c[1]);
+                                }
+                                Value::MultiPoint(coords_vec) => {
+                                    for c in coords_vec {
+                                        min_lon = min_lon.min(c[0]);
+                                        min_lat = min_lat.min(c[1]);
+                                        max_lon = max_lon.max(c[0]);
+                                        max_lat = max_lat.max(c[1]);
+                                    }
+                                }
+                                Value::LineString(line) => {
+                                    for c in line {
+                                        min_lon = min_lon.min(c[0]);
+                                        min_lat = min_lat.min(c[1]);
+                                        max_lon = max_lon.max(c[0]);
+                                        max_lat = max_lat.max(c[1]);
+                                    }
+                                }
+                                Value::MultiLineString(multi_line) => {
+                                    for line in multi_line {
+                                        for c in line {
+                                            min_lon = min_lon.min(c[0]);
+                                            min_lat = min_lat.min(c[1]);
+                                            max_lon = max_lon.max(c[0]);
+                                            max_lat = max_lat.max(c[1]);
+                                        }
+                                    }
+                                }
+                                Value::Polygon(polygon) => {
+                                    for ring in polygon {
+                                        // Each ring (exterior and interior)
+                                        for c in ring {
+                                            min_lon = min_lon.min(c[0]);
+                                            min_lat = min_lat.min(c[1]);
+                                            max_lon = max_lon.max(c[0]);
+                                            max_lat = max_lat.max(c[1]);
+                                        }
+                                    }
+                                }
+                                Value::MultiPolygon(multi_polygon) => {
+                                    for polygon in multi_polygon {
+                                        for ring in polygon {
+                                            for c in ring {
+                                                min_lon = min_lon.min(c[0]);
+                                                min_lat = min_lat.min(c[1]);
+                                                max_lon = max_lon.max(c[0]);
+                                                max_lat = max_lat.max(c[1]);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => { /* Ignore GeometryCollection or unknown types for BBox for now */
+                                }
+                            }
+                        };
+
+                        match geojson {
+                            GeoJson::FeatureCollection(collection) => {
+                                info.feature_count = collection.features.len();
+                                for feature in collection.features {
+                                    if let Some(geometry) = feature.geometry {
+                                        process_geometry_for_info(&geometry);
+                                    }
+                                }
+                            }
+                            GeoJson::Feature(feature) => {
+                                info.feature_count = 1;
+                                if let Some(geometry) = feature.geometry {
+                                    process_geometry_for_info(&geometry);
+                                }
+                            }
+                            GeoJson::Geometry(geometry) => {
+                                // Handle case where root is just a geometry, treat as one feature
+                                info.feature_count = 1;
+                                process_geometry_for_info(&geometry);
+                            }
+                        }
+
+                        if info.feature_count > 0 && min_lon != f64::MAX {
+                            // Check if bounding box was actually calculated
+                            info.bbox = Some([min_lon, min_lat, max_lon, max_lat]);
+                        }
+                    }
+                    Err(e) => {
+                        info.parse_error = Some(format!("GeoJSON Parse Error: {}", e));
+                    }
                 }
             } else {
-                file_info_lines.push(String::from("Info: Not available"));
+                info.parse_error = Some(String::from("Info: No file selected"));
             }
+            cached_geojson_info[selected_file_index] = Some(info.clone()); // Store in cache
+            current_geojson_info = info; // Return the newly loaded info
         } else {
-            file_info_lines.push(String::from("Info: No file selected"));
+            current_geojson_info = cached_geojson_info[selected_file_index]
+                .as_ref()
+                .unwrap()
+                .clone(); // Get from cache
+        }
+
+        let mut file_info_lines: Vec<String> = Vec::new();
+        file_info_lines.push(format!("Size: {} KB", current_geojson_info.file_size_kb));
+        file_info_lines.push(format!("Modified: {}", current_geojson_info.modified_time));
+        file_info_lines.push(format!("Features: {}", current_geojson_info.feature_count));
+        for (geom_type, count) in &current_geojson_info.geometry_counts {
+            file_info_lines.push(format!("  {}: {}", geom_type, count));
+        }
+        if let Some(bbox) = current_geojson_info.bbox {
+            file_info_lines.push(format!(
+                "BBox: [{:.2},{:.2},{:.2},{:.2}]",
+                bbox[0], bbox[1], bbox[2], bbox[3]
+            ));
+        } else {
+            file_info_lines.push(String::from("BBox: Not applicable/Found"));
+        }
+        if let Some(ref error) = current_geojson_info.parse_error {
+            file_info_lines.push(error.clone());
         }
 
         ui.begin(Vec2::new(0, 0), LayoutKind::Vert);
@@ -434,13 +587,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         };
                         ui.label_fixed_width(&display_text, left_panel_width, pair);
                     }
+                    // Fill remaining lines with empty spaces if there are fewer files than max_visible_items
                     for _ in (end_display_index - scroll_offset)..max_visible_items_in_list {
                         ui.label_fixed_width("", left_panel_width, REGULAR_PAIR);
                     }
                 }
                 ui.end_layout(); // End Left Panel
 
-                // --- Right Panel ---
+                // --- Right Panel: Three Vertical Sections ---
                 ui.begin_layout(LayoutKind::Vert);
                 {
                     // Section 1: Detailed File Information
@@ -464,44 +618,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     ui.end_layout();
 
-                    // // Section 2: Plotting Configuration Options
-                    // ui.begin_layout(LayoutKind::Vert);
-                    // {
-                    //     ui.label_fixed_width(
-                    //         "--- Plotting Options ---",
-                    //         right_panel_width,
-                    //         REGULAR_PAIR,
-                    //     );
-                    //     for _ in 0..(base_section_content_height + remaining_rows_for_last_section)
-                    //     {
-                    //         ui.label_fixed_width(
-                    //             "- Placeholder Line for Options -",
-                    //             right_panel_width,
-                    //             REGULAR_PAIR,
-                    //         );
-                    //     }
-                    // }
-                    // ui.end_layout();
-
-                    // Section 2: Dynamic Help / Keybinds
+                    // Section 2: Plotting Configuration Options
                     ui.begin_layout(LayoutKind::Vert);
                     {
                         ui.label_fixed_width(
-                            "--- Help / Keybinds ---",
+                            "--- Plotting Options ---",
                             right_panel_width,
                             REGULAR_PAIR,
                         );
-                        // Display help information
-                        for line in help_keybinds.iter() {
-                            ui.label_fixed_width(line, right_panel_width, REGULAR_PAIR);
-                        }
-                        // Fill remaining lines for this section's content
-                        let lines_printed = help_keybinds.len();
-                        let lines_to_fill =
-                            cmp::max(0, base_section_content_height.saturating_sub(lines_printed));
-                        for _ in 0..lines_to_fill {
-                            ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
-                        }
+                        // Display current plot color
+                        let current_plot_color = &plot_colors[current_color_index];
+                        ui.label_fixed_width(
+                            &format!(
+                                "Current Plot Color: R{} G{} B{}",
+                                current_plot_color.0, current_plot_color.1, current_plot_color.2
+                            ),
+                            right_panel_width,
+                            REGULAR_PAIR,
+                        );
                     }
                     ui.end_layout();
                 }
@@ -511,7 +645,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             ui.label_fixed_width("", x, REGULAR_PAIR); // Spacer
             ui.label_fixed_width(
-                "Use J/K to navigate, Enter to select, Q to quit.",
+                "Use J/K to navigate, Enter to select, C to change color, Q to quit.",
                 x,
                 REGULAR_PAIR,
             );
@@ -523,7 +657,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let key = getch(); // Get user input
         if key != ERR {
             ui.key = Some(key);
-            notification.clear();
+            notification.clear(); // Clear notification on new input
 
             match key {
                 // Navigation
@@ -549,12 +683,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 // Select file
                 constants::KEY_ENTER => {
-                    quit = true; // Exit loop to process selection
+                    quit = true;
                     notification = format!("Selected: {}", geojson_files[selected_file_index]);
                 }
                 val if val == '\n' as i32 => {
-                    quit = true; // Exit loop to process selection
+                    quit = true;
                     notification = format!("Selected: {}", geojson_files[selected_file_index]);
+                }
+                // Change plot color
+                val if val == 'c' as i32 || val == 'C' as i32 => {
+                    current_color_index = (current_color_index + 1) % plot_colors.len();
+                    notification = format!(
+                        "Plot color changed to R{} G{} B{}",
+                        plot_colors[current_color_index].0,
+                        plot_colors[current_color_index].1,
+                        plot_colors[current_color_index].2
+                    );
                 }
                 // Quit
                 val if val == 'q' as i32 => {
@@ -567,6 +711,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+        previous_selected_file_index = selected_file_index;
     }
 
     // --- Plotting Logic ---
@@ -603,61 +748,96 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         chart.configure_mesh().draw()?;
 
+        // Get the current plotting color
+        let current_plot_color = &plot_colors[current_color_index];
+
         match read_geojson(
             full_filepath
                 .to_str()
                 .expect("Failed to convert path to string"),
         ) {
             Ok(geojson) => {
-                if let GeoJson::FeatureCollection(collection) = geojson {
-                    for feature in collection.features {
-                        if let Some(geometry) = feature.geometry {
-                            match geometry.value {
-                                Value::LineString(lines) => {
-                                    chart.draw_series(LineSeries::new(
-                                        lines
-                                            .into_iter()
-                                            .map(|line_coord| (line_coord[0], line_coord[1])),
-                                        &RGBColor(0, 0, 0), // Black lines
-                                    ))?;
-                                }
-                                Value::MultiLineString(multi_lines) => {
-                                    for lines_segment in multi_lines {
-                                        chart.draw_series(LineSeries::new(
-                                            lines_segment
-                                                .into_iter()
-                                                .map(|line_coord| (line_coord[0], line_coord[1])),
-                                            &RGBColor(0, 0, 0), // Black lines
-                                        ))?;
-                                    }
-                                }
-                                Value::Polygon(polygon_rings) => {
-                                    // Draw the exterior ring of the polygon
-                                    if let Some(exterior_ring) = polygon_rings.get(0) {
-                                        chart.draw_series(LineSeries::new(
-                                            exterior_ring
-                                                .into_iter()
-                                                .map(|point| (point[0], point[1])),
-                                            &RGBColor(0, 0, 0), // Black outlines for polygons
-                                        ))?;
-                                    }
-                                }
-                                Value::MultiPolygon(multi_polygon) => {
-                                    // For each polygon in the multi-polygon, draw its exterior ring
-                                    for polygon in multi_polygon {
-                                        if let Some(exterior_ring) = polygon.get(0) {
-                                            chart.draw_series(LineSeries::new(
-                                                exterior_ring
-                                                    .into_iter()
-                                                    .map(|point| (point[0], point[1])),
-                                                &RGBColor(0, 0, 0), // Black outlines for polygons
-                                            ))?;
-                                        }
-                                    }
-                                }
-                                _ => { /* Ignore other geometry types for now */ }
+                let mut draw_geometry = |geometry: geojson::Geometry,
+                                         color: &RGBColor|
+                 -> Result<(), Box<dyn Error>> {
+                    match geometry.value {
+                        Value::Point(c) => {
+                            chart.draw_series(PointSeries::of_element(
+                                vec![(c[0], c[1])],
+                                5, // Point size
+                                color.filled(),
+                                &|c, s, st| {
+                                    return EmptyElement::at(c) + Circle::new((0, 0), s, st);
+                                },
+                            ))?;
+                        }
+                        Value::MultiPoint(coords_vec) => {
+                            chart.draw_series(PointSeries::of_element(
+                                coords_vec.into_iter().map(|c| (c[0], c[1])),
+                                5,
+                                color.filled(),
+                                &|c, s, st| {
+                                    return EmptyElement::at(c) + Circle::new((0, 0), s, st);
+                                },
+                            ))?;
+                        }
+                        Value::LineString(lines) => {
+                            chart.draw_series(LineSeries::new(
+                                lines
+                                    .into_iter()
+                                    .map(|line_coord| (line_coord[0], line_coord[1])),
+                                color,
+                            ))?;
+                        }
+                        Value::MultiLineString(multi_lines) => {
+                            for lines_segment in multi_lines {
+                                chart.draw_series(LineSeries::new(
+                                    lines_segment
+                                        .into_iter()
+                                        .map(|line_coord| (line_coord[0], line_coord[1])),
+                                    color,
+                                ))?;
                             }
                         }
+                        Value::Polygon(polygon_rings) => {
+                            // Draw the exterior ring of the polygon
+                            if let Some(exterior_ring) = polygon_rings.get(0) {
+                                chart.draw_series(LineSeries::new(
+                                    exterior_ring.into_iter().map(|point| (point[0], point[1])),
+                                    color,
+                                ))?;
+                            }
+                        }
+                        Value::MultiPolygon(multi_polygon) => {
+                            for polygon in multi_polygon {
+                                if let Some(exterior_ring) = polygon.get(0) {
+                                    chart.draw_series(LineSeries::new(
+                                        exterior_ring.into_iter().map(|point| (point[0], point[1])),
+                                        color,
+                                    ))?;
+                                }
+                            }
+                        }
+                        _ => { /* Ignore GeometryCollection for now */ }
+                    }
+                    Ok(())
+                };
+
+                match geojson {
+                    GeoJson::FeatureCollection(collection) => {
+                        for feature in collection.features {
+                            if let Some(geometry) = feature.geometry {
+                                draw_geometry(geometry, current_plot_color)?;
+                            }
+                        }
+                    }
+                    GeoJson::Feature(feature) => {
+                        if let Some(geometry) = feature.geometry {
+                            draw_geometry(geometry, current_plot_color)?;
+                        }
+                    }
+                    GeoJson::Geometry(geometry) => {
+                        draw_geometry(geometry, current_plot_color)?;
                     }
                 }
             }
