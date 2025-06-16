@@ -220,7 +220,6 @@ impl Ui {
             mv(pos.y, pos.x);
             attron(COLOR_PAIR(REGULAR_PAIR));
             addstr(buffer);
-            // Clear rest of the line if buffer is shorter than previous content
             for _ in buffer.len() as i32..width {
                 addch(' ' as chtype);
             }
@@ -274,13 +273,13 @@ enum AppMode {
 // Basic fuzzy matching function
 fn fuzzy_match(pattern: &str, text: &str) -> bool {
     if pattern.is_empty() {
-        return true;
+        return true; // Empty pattern matches everything
     }
 
-    let mut pattern_chars = pattern.chars().peekable();
+    let pattern_lower = pattern.to_lowercase(); // Case-insensitive search
     let text_lower = text.to_lowercase(); // Case-insensitive search
-    let pattern_lower = pattern.to_lowercase();
 
+    let mut pattern_chars = pattern_lower.chars().peekable();
     let mut text_chars = text_lower.chars();
     let mut current_pattern_char = pattern_chars.next();
 
@@ -379,8 +378,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut plot_lines = true;
     let mut plot_polygons = true;
 
-    // Multi-file selection and individual colors
-    let mut selected_files_status: Vec<bool> = vec![false; geojson_files.len()]; // Still tracks status for ALL files
+    let mut selected_files_status: Vec<bool> = vec![false; geojson_files.len()];
     let mut assigned_plot_colors: Vec<Option<RGBColor>> = vec![None; geojson_files.len()];
     let mut current_color_index_for_assignment = 0; // Index for cycling colors when selecting files
 
@@ -491,7 +489,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let available_content_rows = max_visible_items_in_list + 1; // +1 for "Available GeoJSON files:" title
 
-        let section_title_rows = 1; // Each section title takes 1 row
+        let section_title_rows = 1;
         let num_right_sections = 3;
         let total_right_section_title_rows = section_title_rows * num_right_sections;
 
@@ -505,7 +503,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // --- File Information & Metadata Retrieval (Cached) ---
         let current_original_file_index = if filtered_geojson_indices.is_empty() {
-            0
+            0 // Or use a value indicating no file selected
         } else {
             filtered_geojson_indices[selected_file_index]
         };
@@ -812,7 +810,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 ui.edit_field(
                                     &mut output_filename_buffer,
                                     &mut output_filename_cursor,
-                                    remaining_width_for_field - 2,
+                                    remaining_width_for_field - 2, // -2 for padding or cursor space
                                     ui.key,
                                 );
                             } else {
@@ -844,6 +842,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             right_panel_width,
                             REGULAR_PAIR,
                         );
+                        // Fill remaining lines for this section's content
                         let lines_printed = 4;
                         let lines_to_fill = cmp::max(
                             0,
@@ -1044,10 +1043,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             current_mode = AppMode::Navigation;
                             curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor
                         }
-                        _ => {
-                            // The `edit_field` function itself will handle text input and cursor movement.
-                            // We just ensure `ui.key` holds the last pressed key.
-                        }
+                        _ => {}
                     }
                 }
                 AppMode::Searching => {
@@ -1081,7 +1077,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         _ => {
                             // `edit_field` handles text input, so no other direct key handling needed here for input.
-                            // The key is passed via `ui.key`.
                         }
                     }
                 }
@@ -1102,9 +1097,61 @@ fn main() -> Result<(), Box<dyn Error>> {
     if files_to_plot.is_empty() {
         println!("No files selected for plotting. Exited without generating a plot.");
     } else if !CTRLC.load(Ordering::Relaxed) {
+        let output_filename = PathBuf::from(OUTPUT_DIR).join(&output_filename_buffer);
+
+        // --- Calculate combined BBox for selected files ---
+        let mut overall_min_lon = f64::MAX;
+        let mut overall_min_lat = f64::MAX;
+        let mut overall_max_lon = f64::MIN;
+        let mut overall_max_lat = f64::MIN;
+        let mut bbox_found = false;
+
+        for (file_idx, _) in &files_to_plot {
+            if let Some(info) = &cached_geojson_info[*file_idx] {
+                if let Some(bbox) = info.bbox {
+                    overall_min_lon = overall_min_lon.min(bbox[0]);
+                    overall_min_lat = overall_min_lat.min(bbox[1]);
+                    overall_max_lon = overall_max_lon.max(bbox[2]);
+                    overall_max_lat = overall_max_lat.max(bbox[3]);
+                    bbox_found = true;
+                }
+            }
+        }
+
+        let mut x_range = -180.0f64..180.0f64;
+        let mut y_range = -90.0f64..90.0f64;
+
+        if bbox_found {
+            let padding_percentage = 0.1; // 10% padding
+            let epsilon = 0.001;
+
+            let mut lon_range = overall_max_lon - overall_min_lon;
+            if lon_range < epsilon {
+                lon_range = epsilon;
+            }
+            let mut lat_range = overall_max_lat - overall_min_lat;
+            if lat_range < epsilon {
+                lat_range = epsilon;
+            }
+
+            let lon_padding = lon_range * padding_percentage;
+            let lat_padding = lat_range * padding_percentage;
+
+            let padded_min_lon = (overall_min_lon - lon_padding).max(-180.0);
+            let padded_max_lon = (overall_max_lon + lon_padding).min(180.0);
+            let padded_min_lat = (overall_min_lat - lat_padding).max(-90.0);
+            let padded_max_lat = (overall_max_lat + lat_padding).min(90.0);
+
+            x_range = padded_min_lon..padded_max_lon;
+            y_range = padded_min_lat..padded_max_lat;
+        } else {
+            println!(
+                "Warning: No valid bounding box found for selected files. Using default global view."
+            );
+        }
+
         // Setup drawing area only if files are selected and not quitting
-        let output_filename = PathBuf::from(OUTPUT_DIR).join(&output_filename_buffer); // Use the custom filename
-        let chart_caption = format!("GeoJSON Multi-File Plot");
+        let chart_caption = format!("GeoJSON Plot");
 
         let width = 1024;
         let height = 768;
@@ -1120,14 +1167,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut chart = ChartBuilder::on(&root)
             .margin(10)
             .caption(&chart_caption, ("sans-serif", 40).into_font())
-            .build_cartesian_2d(-180.0f64..180.0f64, -90.0f64..90.0f64)?; // Global view for now
+            .build_cartesian_2d(x_range, y_range)?;
 
         chart.configure_mesh().draw()?;
 
         for (file_idx, chosen_filename_str) in files_to_plot {
             let full_filepath = PathBuf::from(GEOJSON_DIR).join(chosen_filename_str);
             let plot_color_for_file = assigned_plot_colors[file_idx].unwrap_or_else(|| {
-                // Fallback to black if for some reason color wasn't assigned (shouldn't happen with logic)
+                // Fallback to black if for some reason color wasn't assigned
                 RGBColor(0, 0, 0)
             });
 
@@ -1203,7 +1250,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             color,
                                         ))?;
                                     }
-                                    // You could also draw interior rings if needed, or fill polygons
                                 }
                             }
                             Value::MultiPolygon(multi_polygon) => {
@@ -1220,8 +1266,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     }
                                 }
                             }
-                            _ => { /* Ignore GeometryCollection or unknown types for BBox for now */
-                            }
+                            _ => {}
                         }
                         Ok(())
                     };
