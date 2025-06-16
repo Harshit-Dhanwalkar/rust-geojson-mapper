@@ -264,9 +264,40 @@ struct GeoJsonInfo {
     parse_error: Option<String>,
 }
 
+#[derive(PartialEq)]
 enum AppMode {
     Navigation,
     EditingFilename,
+    Searching,
+}
+
+// Basic fuzzy matching function
+fn fuzzy_match(pattern: &str, text: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+
+    let mut pattern_chars = pattern.chars().peekable();
+    let text_lower = text.to_lowercase(); // Case-insensitive search
+    let pattern_lower = pattern.to_lowercase();
+
+    let mut text_chars = text_lower.chars();
+    let mut current_pattern_char = pattern_chars.next();
+
+    while let Some(p_char) = current_pattern_char {
+        let mut found_char = false;
+        while let Some(t_char) = text_chars.next() {
+            if t_char == p_char {
+                found_char = true;
+                break;
+            }
+        }
+        if !found_char {
+            return false; // Character not found in sequence
+        }
+        current_pattern_char = pattern_chars.next();
+    }
+    true
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -349,23 +380,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut plot_polygons = true;
 
     // Multi-file selection and individual colors
-    let mut selected_files_status: Vec<bool> = vec![false; geojson_files.len()];
+    let mut selected_files_status: Vec<bool> = vec![false; geojson_files.len()]; // Still tracks status for ALL files
     let mut assigned_plot_colors: Vec<Option<RGBColor>> = vec![None; geojson_files.len()];
-    let mut current_color_index_for_assignment = 0;
+    let mut current_color_index_for_assignment = 0; // Index for cycling colors when selecting files
 
     // Output filename state
     let mut output_filename_buffer = String::from("combined_plot.png");
     let mut output_filename_cursor: usize = 0;
-    let mut previous_output_filename_buffer = String::new();
+    let mut previous_output_filename_buffer = String::new(); // To revert on Escape
 
     let mut current_mode = AppMode::Navigation; // Initial mode
 
-    let help_keybinds = vec![
+    // Fuzzy search state
+    let mut search_query_buffer = String::new();
+    let mut search_query_cursor: usize = 0;
+    let mut filtered_geojson_indices: Vec<usize> = (0..geojson_files.len()).collect(); // All files initially
+    let mut previous_search_query_buffer = String::new(); // To revert on Escape
+
+    let mut help_keybinds = vec![
         "J/K or Arrow Keys: Navigate file list",
         "Space: Toggle file selection",
         "Enter: Plot selected files",
         "C: Cycle next assignment color",
         "R: Rename output plot",
+        "/: Start fuzzy search",
         "P: Toggle Points visibility",
         "L: Toggle Lines visibility",
         "O: Toggle Polygons visibility",
@@ -374,7 +412,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Caching for GeoJSON metadata
     let mut cached_geojson_info: Vec<Option<GeoJsonInfo>> = vec![None; geojson_files.len()];
-    let mut previous_selected_file_index: usize = selected_file_index;
+    let mut previous_selected_file_index_in_filtered: usize = selected_file_index;
 
     // Main TUI Loop
     while !quit && !poll_signal() {
@@ -384,17 +422,53 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut y = 0;
         getmaxyx(stdscr(), &mut y, &mut x); // Get current terminal dimensions
 
-        // Calculate available rows for the file list
-        let header_rows = 2; // Notification + first spacer
-        let footer_rows = 0; // Removed the help footer, so 0 rows now
-        let title_row = 1; // "Available GeoJSON files:" row, consumed by the main content area title
+        // Re-filter files if search query changed or just entered/exited search mode
+        if current_mode == AppMode::Searching
+            || search_query_buffer.ne(&previous_search_query_buffer)
+        {
+            filtered_geojson_indices.clear();
+            if search_query_buffer.is_empty() {
+                for i in 0..geojson_files.len() {
+                    filtered_geojson_indices.push(i);
+                }
+            } else {
+                for (i, filename) in geojson_files.iter().enumerate() {
+                    if fuzzy_match(&search_query_buffer, filename) {
+                        filtered_geojson_indices.push(i);
+                    }
+                }
+            }
+            // Reset selected index if the current one is no longer in the filtered list
+            if filtered_geojson_indices.is_empty() {
+                selected_file_index = 0;
+            } else if selected_file_index >= filtered_geojson_indices.len() {
+                selected_file_index = filtered_geojson_indices.len() - 1;
+            }
+            previous_search_query_buffer.clone_from(&search_query_buffer);
+        }
+
+        // If not in search mode and a search was active, reset notification
+        if current_mode != AppMode::Searching
+            && !search_query_buffer.is_empty()
+            && notification.starts_with("Searching for")
+        {
+            notification = String::from("Select GeoJSON files to plot:");
+        }
+
+        let mut header_rows = 2; // Notification + spacer
+        if let AppMode::Searching = current_mode {
+            header_rows += 1;
+        }
+        let footer_rows = 0;
+        let title_row = 1;
         let fixed_ui_rows = header_rows + footer_rows + title_row;
 
         let max_visible_items_in_list = cmp::max(0, y - fixed_ui_rows) as usize;
 
         // Adjust scroll_offset to keep selected_file_index in view
-        if selected_file_index >= geojson_files.len() {
-            selected_file_index = cmp::max(0, geojson_files.len().saturating_sub(1));
+        let current_list_len = filtered_geojson_indices.len();
+        if selected_file_index >= current_list_len {
+            selected_file_index = cmp::max(0, current_list_len.saturating_sub(1));
         }
 
         if selected_file_index >= scroll_offset + max_visible_items_in_list
@@ -405,26 +479,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         if selected_file_index < scroll_offset {
             scroll_offset = selected_file_index;
         }
-        // Ensure scroll_offset doesn't go out of bounds at the end of the list
-        if geojson_files.len() <= max_visible_items_in_list {
+        if current_list_len <= max_visible_items_in_list {
             scroll_offset = 0; // All files fit, no scrolling needed
-        } else if scroll_offset
-            > geojson_files
-                .len()
-                .saturating_sub(max_visible_items_in_list)
-        {
-            scroll_offset = geojson_files
-                .len()
-                .saturating_sub(max_visible_items_in_list);
+        } else if scroll_offset > current_list_len.saturating_sub(max_visible_items_in_list) {
+            scroll_offset = current_list_len.saturating_sub(max_visible_items_in_list);
         }
 
-        let main_content_width = x;
+        let main_content_width = x; // Total width for the main content area
         let left_panel_width = main_content_width / 2;
-        let right_panel_width = main_content_width - left_panel_width;
+        let right_panel_width = main_content_width - left_panel_width; // Right panel takes remaining width
 
-        let available_content_rows = max_visible_items_in_list + 1;
+        let available_content_rows = max_visible_items_in_list + 1; // +1 for "Available GeoJSON files:" title
 
-        let section_title_rows = 1;
+        let section_title_rows = 1; // Each section title takes 1 row
         let num_right_sections = 3;
         let total_right_section_title_rows = section_title_rows * num_right_sections;
 
@@ -437,13 +504,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             (available_content_rows - total_right_section_title_rows) % num_right_sections;
 
         // --- File Information & Metadata Retrieval (Cached) ---
+        let current_original_file_index = if filtered_geojson_indices.is_empty() {
+            0
+        } else {
+            filtered_geojson_indices[selected_file_index]
+        };
+
         let current_geojson_info: GeoJsonInfo;
-        if selected_file_index != previous_selected_file_index
-            || cached_geojson_info[selected_file_index].is_none()
+        if current_original_file_index != previous_selected_file_index_in_filtered
+            || cached_geojson_info[current_original_file_index].is_none()
         {
             // Load and process only if index changed or not cached yet
             let mut info = GeoJsonInfo::default();
-            if let Some(chosen_filename_str) = geojson_files.get(selected_file_index) {
+            if let Some(chosen_filename_str) = geojson_files.get(current_original_file_index) {
                 let full_filepath = PathBuf::from(GEOJSON_DIR).join(chosen_filename_str);
                 if let Ok(metadata) = fs::metadata(&full_filepath) {
                     info.file_size_kb = metadata.len() / 1024;
@@ -567,10 +640,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 info.parse_error = Some(String::from("Info: No file selected"));
             }
-            cached_geojson_info[selected_file_index] = Some(info.clone()); // Store in cache
+            cached_geojson_info[current_original_file_index] = Some(info.clone()); // Store in cache
             current_geojson_info = info; // Return the newly loaded info
         } else {
-            current_geojson_info = cached_geojson_info[selected_file_index]
+            current_geojson_info = cached_geojson_info[current_original_file_index]
                 .as_ref()
                 .unwrap()
                 .clone(); // Get from cache
@@ -600,6 +673,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             ui.label_fixed_width(&notification, x, REGULAR_PAIR);
             ui.label_fixed_width("", x, REGULAR_PAIR); // Spacer
 
+            // Render search bar if in search mode
+            if let AppMode::Searching = current_mode {
+                ui.begin_layout(LayoutKind::Horz);
+                {
+                    ui.label_fixed_width("Search:", 8, REGULAR_PAIR);
+                    ui.edit_field(
+                        &mut search_query_buffer,
+                        &mut search_query_cursor,
+                        x - 8,
+                        ui.key,
+                    );
+                }
+                ui.end_layout();
+            }
+
             ui.begin_layout(LayoutKind::Horz); // Start Horizontal split for main content
             {
                 // --- Left Panel: GeoJSON File List ---
@@ -610,20 +698,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                         left_panel_width,
                         REGULAR_PAIR,
                     );
-                    // Display visible file list items
+                    // Display visible file list items from filtered_geojson_indices
                     let end_display_index = cmp::min(
                         scroll_offset + max_visible_items_in_list,
-                        geojson_files.len(),
+                        filtered_geojson_indices.len(),
                     );
                     for i in scroll_offset..end_display_index {
-                        let file_name = &geojson_files[i];
-                        let selection_indicator = if selected_files_status[i] {
+                        let original_index = filtered_geojson_indices[i];
+                        let file_name = &geojson_files[original_index];
+                        let selection_indicator = if selected_files_status[original_index] {
                             "[x]"
                         } else {
                             "[ ]"
                         };
-                        let display_text =
-                            format!("{} {}. {}", selection_indicator, i + 1, file_name);
+                        let display_text = format!(
+                            "{} {}. {}",
+                            selection_indicator,
+                            original_index + 1,
+                            file_name
+                        );
                         let pair = if i == selected_file_index {
                             HIGHLIGHT_PAIR
                         } else {
@@ -662,7 +755,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     ui.end_layout();
 
-                    // Section 2: Plotting Configuration Options
+                    // Section 2: Dynamic Help / Keybinds
+                    ui.begin_layout(LayoutKind::Vert);
+                    {
+                        ui.label_fixed_width(
+                            "--- Help / Keybinds ---",
+                            right_panel_width,
+                            REGULAR_PAIR,
+                        );
+                        // Display help information
+                        for line in help_keybinds.iter() {
+                            ui.label_fixed_width(line, right_panel_width, REGULAR_PAIR);
+                        }
+                        // Fill remaining lines for this section's content
+                        let lines_printed = help_keybinds.len();
+                        let lines_to_fill =
+                            cmp::max(0, base_section_content_height.saturating_sub(lines_printed));
+                        for _ in 0..lines_to_fill {
+                            ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
+                        }
+                    }
+                    ui.end_layout();
+
+                    // Section 3: Plotting Configuration Options
                     ui.begin_layout(LayoutKind::Vert);
                     {
                         ui.label_fixed_width(
@@ -670,32 +785,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             right_panel_width,
                             REGULAR_PAIR,
                         );
-                        // Display next plot assignment color
                         let next_plot_color = &plot_colors[current_color_index_for_assignment];
                         ui.label_fixed_width(
                             &format!(
                                 "Next Color to Assign: R{} G{} B{}",
                                 next_plot_color.0, next_plot_color.1, next_plot_color.2
-                            ),
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-
-                        // Display visibility toggles
-                        ui.label_fixed_width(
-                            &format!("Points Visible: {}", if plot_points { "Yes" } else { "No" }),
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-                        ui.label_fixed_width(
-                            &format!("Lines Visible: {}", if plot_lines { "Yes" } else { "No" }),
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-                        ui.label_fixed_width(
-                            &format!(
-                                "Polygons Visible: {}",
-                                if plot_polygons { "Yes" } else { "No" }
                             ),
                             right_panel_width,
                             REGULAR_PAIR,
@@ -731,35 +825,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         ui.end_layout(); // End horizontal layout for filename
 
-                        // Fill remaining lines for this section's content
+                        // Display visibility toggles
+                        ui.label_fixed_width(
+                            &format!("Points Visible: {}", if plot_points { "Yes" } else { "No" }),
+                            right_panel_width,
+                            REGULAR_PAIR,
+                        );
+                        ui.label_fixed_width(
+                            &format!("Lines Visible: {}", if plot_lines { "Yes" } else { "No" }),
+                            right_panel_width,
+                            REGULAR_PAIR,
+                        );
+                        ui.label_fixed_width(
+                            &format!(
+                                "Polygons Visible: {}",
+                                if plot_polygons { "Yes" } else { "No" }
+                            ),
+                            right_panel_width,
+                            REGULAR_PAIR,
+                        );
                         let lines_printed = 4;
                         let lines_to_fill = cmp::max(
                             0,
                             (base_section_content_height + remaining_rows_for_last_section)
                                 .saturating_sub(lines_printed),
                         );
-                        for _ in 0..lines_to_fill {
-                            ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
-                        }
-                    }
-                    ui.end_layout();
-
-                    // Section 3: Dynamic Help / Keybinds
-                    ui.begin_layout(LayoutKind::Vert);
-                    {
-                        ui.label_fixed_width(
-                            "--- Help / Keybinds ---",
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-                        // Display help information
-                        for line in help_keybinds.iter() {
-                            ui.label_fixed_width(line, right_panel_width, REGULAR_PAIR);
-                        }
-                        // Fill remaining lines for this section's content
-                        let lines_printed = help_keybinds.len();
-                        let lines_to_fill =
-                            cmp::max(0, base_section_content_height.saturating_sub(lines_printed));
                         for _ in 0..lines_to_fill {
                             ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
                         }
@@ -787,13 +877,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     match key {
                         // Navigation
                         constants::KEY_DOWN => {
-                            if selected_file_index + 1 < geojson_files.len() {
+                            if selected_file_index + 1 < filtered_geojson_indices.len() {
                                 selected_file_index += 1;
                             }
                         }
+                        // Use ASCII value for 'j'
                         106 => {
                             // 'j' as i32
-                            if selected_file_index + 1 < geojson_files.len() {
+                            if selected_file_index + 1 < filtered_geojson_indices.len() {
                                 selected_file_index += 1;
                             }
                         }
@@ -802,6 +893,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 selected_file_index -= 1;
                             }
                         }
+                        // Use ASCII value for 'k'
                         107 => {
                             // 'k' as i32
                             if selected_file_index > 0 {
@@ -811,28 +903,35 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // Toggle file selection
                         32 => {
                             // ' ' as i32 (space)
-                            selected_files_status[selected_file_index] =
-                                !selected_files_status[selected_file_index];
-                            if selected_files_status[selected_file_index] {
-                                assigned_plot_colors[selected_file_index] =
-                                    Some(plot_colors[current_color_index_for_assignment]);
-                                notification = format!(
-                                    "Selected: {} (Color: R{} G{} B{})",
-                                    geojson_files[selected_file_index],
-                                    plot_colors[current_color_index_for_assignment].0,
-                                    plot_colors[current_color_index_for_assignment].1,
-                                    plot_colors[current_color_index_for_assignment].2
-                                );
-                                current_color_index_for_assignment =
-                                    (current_color_index_for_assignment + 1) % plot_colors.len();
+                            if !filtered_geojson_indices.is_empty() {
+                                let original_index = filtered_geojson_indices[selected_file_index];
+                                selected_files_status[original_index] =
+                                    !selected_files_status[original_index];
+                                if selected_files_status[original_index] {
+                                    assigned_plot_colors[original_index] =
+                                        Some(plot_colors[current_color_index_for_assignment]);
+                                    notification = format!(
+                                        "Selected: {} (Color: R{} G{} B{})",
+                                        geojson_files[original_index],
+                                        plot_colors[current_color_index_for_assignment].0,
+                                        plot_colors[current_color_index_for_assignment].1,
+                                        plot_colors[current_color_index_for_assignment].2
+                                    );
+                                    current_color_index_for_assignment =
+                                        (current_color_index_for_assignment + 1)
+                                            % plot_colors.len();
+                                } else {
+                                    assigned_plot_colors[original_index] = None;
+                                    notification =
+                                        format!("Deselected: {}", geojson_files[original_index]);
+                                }
                             } else {
-                                assigned_plot_colors[selected_file_index] = None;
-                                notification =
-                                    format!("Deselected: {}", geojson_files[selected_file_index]);
+                                notification = String::from("No files to select in current view.");
                             }
                         }
                         // Plot selected files
                         constants::KEY_ENTER | 10 => {
+                            // 10 is '\n' as i32
                             let num_selected = selected_files_status.iter().filter(|&&s| s).count();
                             if num_selected > 0 {
                                 quit = true; // Exit loop to process selection
@@ -845,6 +944,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         // Cycle next assignment color
                         99 | 67 => {
+                            // 'c' as i32 | 'C' as i32
                             current_color_index_for_assignment =
                                 (current_color_index_for_assignment + 1) % plot_colors.len();
                             notification = format!(
@@ -856,6 +956,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         // Rename output plot
                         114 | 82 => {
+                            // 'r' as i32 | 'R' as i32
                             current_mode = AppMode::EditingFilename;
                             previous_output_filename_buffer.clone_from(&output_filename_buffer);
                             notification = String::from(
@@ -863,8 +964,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                             );
                             curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE); // Show cursor
                         }
+                        // Start fuzzy search
+                        47 => {
+                            // '/' as i32
+                            current_mode = AppMode::Searching;
+                            previous_search_query_buffer.clone_from(&search_query_buffer); // Save current for potential revert
+                            notification = String::from(
+                                "Enter search query. Press Enter to apply, Escape to cancel.",
+                            );
+                            curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE); // Show cursor
+                        }
                         // Toggle Points
                         112 | 80 => {
+                            // 'p' as i32 | 'P' as i32
                             plot_points = !plot_points;
                             notification = format!(
                                 "Points visibility: {}",
@@ -873,14 +985,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         // Toggle Lines
                         108 | 76 => {
+                            // 'l' as i32 | 'L' as i32
                             plot_lines = !plot_lines;
                             notification = format!(
                                 "Lines visibility: {}",
                                 if plot_lines { "ON" } else { "OFF" }
                             );
                         }
-                        // Toggle Polygons
+                        // Toggle Polygons (using 'o' to avoid conflict with 'P' for points)
                         111 | 79 => {
+                            // 'o' as i32 | 'O' as i32
                             plot_polygons = !plot_polygons;
                             notification = format!(
                                 "Polygons visibility: {}",
@@ -889,10 +1003,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         // Quit
                         113 => {
+                            // 'q' as i32
                             quit = true;
                             notification = String::from("Exiting...");
                         }
                         _ => {
+                            // Handle other keys or do nothing
                             notification = format!("Unknown key: {}", key);
                         }
                     }
@@ -900,6 +1016,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 AppMode::EditingFilename => {
                     match key {
                         constants::KEY_ENTER | 10 => {
+                            // 10 is '\n' as i32
                             if output_filename_buffer.is_empty() {
                                 notification = String::from("Filename cannot be empty. Reverted.");
                                 output_filename_buffer.clone_from(&previous_output_filename_buffer);
@@ -927,15 +1044,53 @@ fn main() -> Result<(), Box<dyn Error>> {
                             current_mode = AppMode::Navigation;
                             curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor
                         }
-                        _ => {}
+                        _ => {
+                            // The `edit_field` function itself will handle text input and cursor movement.
+                            // We just ensure `ui.key` holds the last pressed key.
+                        }
+                    }
+                }
+                AppMode::Searching => {
+                    match key {
+                        constants::KEY_ENTER | 10 => {
+                            // 10 is '\n' as i32
+                            if search_query_buffer.is_empty() {
+                                notification = String::from("Search cleared. Showing all files.");
+                            } else {
+                                notification = format!(
+                                    "Searching for: '{}' ({} results)",
+                                    search_query_buffer,
+                                    filtered_geojson_indices.len()
+                                );
+                            }
+                            current_mode = AppMode::Navigation;
+                            curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor
+                        }
+                        constants::KEY_EXIT | constants::KEY_CANCEL | 27 => {
+                            // 27 is ASCII for ESC
+                            search_query_buffer.clone_from(&previous_search_query_buffer); // Revert search query
+                            // Re-filter immediately to show original list if query was cleared
+                            filtered_geojson_indices.clear();
+                            for i in 0..geojson_files.len() {
+                                filtered_geojson_indices.push(i);
+                            }
+                            selected_file_index = 0; // Reset selection to top of the (now full) list
+                            notification = String::from("Search cancelled. Showing all files.");
+                            current_mode = AppMode::Navigation;
+                            curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor
+                        }
+                        _ => {
+                            // `edit_field` handles text input, so no other direct key handling needed here for input.
+                            // The key is passed via `ui.key`.
+                        }
                     }
                 }
             }
         }
-        previous_selected_file_index = selected_file_index; // Update previous index after handling input
+        previous_selected_file_index_in_filtered = current_original_file_index; // Update previous index after handling input
     }
 
-    // --- Plotting Logic ---
+    // --- Plotting Logic (after selection) ---
     endwin(); // End ncurses mode before plotting
 
     let files_to_plot: Vec<(usize, &String)> = geojson_files
@@ -947,8 +1102,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if files_to_plot.is_empty() {
         println!("No files selected for plotting. Exited without generating a plot.");
     } else if !CTRLC.load(Ordering::Relaxed) {
-        let output_filename = PathBuf::from(OUTPUT_DIR).join(&output_filename_buffer);
-        let chart_caption = format!("GeoJSON Plot");
+        // Setup drawing area only if files are selected and not quitting
+        let output_filename = PathBuf::from(OUTPUT_DIR).join(&output_filename_buffer); // Use the custom filename
+        let chart_caption = format!("GeoJSON Multi-File Plot");
 
         let width = 1024;
         let height = 768;
@@ -970,8 +1126,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         for (file_idx, chosen_filename_str) in files_to_plot {
             let full_filepath = PathBuf::from(GEOJSON_DIR).join(chosen_filename_str);
-            let plot_color_for_file =
-                assigned_plot_colors[file_idx].unwrap_or_else(|| RGBColor(0, 0, 0));
+            let plot_color_for_file = assigned_plot_colors[file_idx].unwrap_or_else(|| {
+                // Fallback to black if for some reason color wasn't assigned (shouldn't happen with logic)
+                RGBColor(0, 0, 0)
+            });
 
             match read_geojson(
                 full_filepath
@@ -1036,6 +1194,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             Value::Polygon(polygon_rings) => {
                                 if plot_polygons_flag {
+                                    // Draw the exterior ring of the polygon
                                     if let Some(exterior_ring) = polygon_rings.get(0) {
                                         chart.draw_series(LineSeries::new(
                                             exterior_ring
@@ -1044,6 +1203,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             color,
                                         ))?;
                                     }
+                                    // You could also draw interior rings if needed, or fill polygons
                                 }
                             }
                             Value::MultiPolygon(multi_polygon) => {
