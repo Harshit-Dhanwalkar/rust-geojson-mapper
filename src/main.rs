@@ -11,6 +11,7 @@ use ncurses::*;
 use std::cmp;
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 static CTRLC: AtomicBool = AtomicBool::new(false);
 
@@ -299,10 +300,106 @@ fn fuzzy_match(pattern: &str, text: &str) -> bool {
     true
 }
 
+// Displays a startup screen
+fn display_startup_screen() {
+    let mut max_y = 0;
+    let mut max_x = 0;
+    getmaxyx(stdscr(), &mut max_y, &mut max_x);
+
+    erase(); // Clear the screen
+    curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor
+    noecho(); // Don't echo input characters
+    cbreak(); // Line buffering disabled, pass on every key
+
+    // Define ASCII art and messages
+    let ascii_art = vec![
+        r" /$$$$$$$$ /$$   /$$ /$$$$$$",
+        r"|__  $$__/| $$  | $$|_  $$_/",
+        r"   | $$   | $$  | $$  | $$  ",
+        r"   | $$   | $$  | $$  | $$  ",
+        r"   | $$   | $$  | $$  | $$  ",
+        r"   | $$   | $$  | $$  | $$  ",
+        r"   | $$   |  $$$$$$/ /$$$$$$",
+        r"   |__/    \______/ |______/",
+        r"  /$$$$$$                         /$$$$$  /$$$$$$   /$$$$$$  /$$   /$$",
+        r" /$$__  $$                       |__  $$ /$$__  $$ /$$__  $$| $$$ | $$",
+        r"| $$  \__/  /$$$$$$   /$$$$$$       | $$| $$  \__/| $$  \ $$| $$$$| $$",
+        r"| $$ /$$$$ /$$__  $$ /$$__  $$      | $$|  $$$$$$ | $$  | $$| $$ $$ $$",
+        r"| $$|_  $$| $$$$$$$$| $$  \ $$ /$$  | $$ \____  $$| $$  | $$| $$  $$$$",
+        r"| $$  \ $$| $$_____/| $$  | $$| $$  | $$ /$$  \ $$| $$  | $$| $$\  $$$",
+        r"|  $$$$$$/|  $$$$$$$|  $$$$$$/|  $$$$$$/|  $$$$$$/|  $$$$$$/| $$ \  $$",
+        r" \______/  \_______/ \______/  \______/  \______/  \______/ |__/  \__/",
+        r" /$$      /$$                                                  ",
+        r"| $$$    /$$$                                                  ",
+        r"| $$$$  /$$$$  /$$$$$$   /$$$$$$   /$$$$$$   /$$$$$$   /$$$$$$ ",
+        r"| $$ $$/$$ $$ |____  $$ /$$__  $$ /$$__  $$ /$$__  $$ /$$__  $$",
+        r"| $$  $$$| $$  /$$$$$$$| $$  \ $$| $$  \ $$| $$$$$$$$| $$  \__/",
+        r"| $$\  $ | $$ /$$__  $$| $$  | $$| $$  | $$| $$_____/| $$      ",
+        r"| $$ \/  | $$|  $$$$$$$| $$$$$$$/| $$$$$$$/|  $$$$$$$| $$      ",
+        r"|__/     |__/ \_______/| $$____/ | $$____/  \_______/|__/      ",
+        r"                       | $$      | $$                          ",
+        r"                       | $$      | $$                          ",
+        r"                       |__/      |__/                          ",
+    ];
+    let title = "TUI GeoJSON Mapper";
+    let author = "Developed by Harshit-Dhanwalkar";
+    let project = "https://github.com/Harshit-Dhanwalkar/rust-geojson-mapper/";
+    let instructions = "Press any key to continue...";
+
+    let ascii_art_height = ascii_art.len() as i32;
+    let longest_ascii_line_len = ascii_art.iter().map(|s| s.len()).max().unwrap_or(0) as i32;
+    let mut current_y = max_y / 2 - ascii_art_height / 2 - 8;
+    for line in ascii_art {
+        let line_len = line.len() as i32;
+        let x_pos = (max_x - line_len) / 2;
+        mvprintw(current_y, x_pos, line);
+        current_y += 1;
+    }
+    current_y += 1;
+
+    let title_len = title.len() as i32;
+    let author_len = author.len() as i32;
+    let project_len = project.len() as i32;
+    let instructions_len = instructions.len() as i32;
+
+    let title_x = (max_x - title_len) / 2;
+    mvprintw(current_y, title_x, title);
+    current_y += 2;
+
+    let author_x = (max_x - author_len) / 2;
+    mvprintw(current_y, author_x, author);
+    current_y += 1;
+
+    let project_x = (max_x - project_len) / 2;
+    mvprintw(current_y, project_x, project);
+    current_y += 2;
+
+    let instructions_x = (max_x - instructions_len) / 2;
+    mvprintw(current_y, instructions_x, instructions);
+
+    refresh();
+    getch(); // Blocks until a key is pressed
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     init_signal_handler();
 
     fs::create_dir_all(OUTPUT_DIR)?;
+
+    // --- ncurses TUI Setup ---
+    initscr(); // Initialize ncurses
+    start_color(); // Enable color
+    init_pair(REGULAR_PAIR, COLOR_WHITE, COLOR_BLACK);
+    init_pair(HIGHLIGHT_PAIR, COLOR_BLACK, COLOR_WHITE);
+
+    // Display the startup screen
+    display_startup_screen();
+
+    // After startup screen, set up for main application loop
+    noecho(); // Don't echo input characters
+    keypad(stdscr(), true); // Enable keypad for arrow keys, etc.
+    timeout(16); // ~60 FPS update rate for getch()
+    curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor for main app
 
     let mut geojson_files: Vec<String> = Vec::new();
     let path = Path::new(GEOJSON_DIR);
@@ -344,17 +441,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     geojson_files.sort(); // Sort alphabetically
-
-    // --- ncurses TUI Setup ---
-    initscr();
-    noecho();
-    keypad(stdscr(), true);
-    timeout(16); // ~60 FPS
-    curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE);
-
-    start_color();
-    init_pair(REGULAR_PAIR, COLOR_WHITE, COLOR_BLACK);
-    init_pair(HIGHLIGHT_PAIR, COLOR_BLACK, COLOR_WHITE);
 
     // Define a palette of colors for plotting
     let plot_colors = [
@@ -753,29 +839,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     ui.end_layout();
 
-                    // Section 2: Dynamic Help / Keybinds
-                    ui.begin_layout(LayoutKind::Vert);
-                    {
-                        ui.label_fixed_width(
-                            "--- Help / Keybinds ---",
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-                        // Display help information
-                        for line in help_keybinds.iter() {
-                            ui.label_fixed_width(line, right_panel_width, REGULAR_PAIR);
-                        }
-                        // Fill remaining lines for this section's content
-                        let lines_printed = help_keybinds.len();
-                        let lines_to_fill =
-                            cmp::max(0, base_section_content_height.saturating_sub(lines_printed));
-                        for _ in 0..lines_to_fill {
-                            ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
-                        }
-                    }
-                    ui.end_layout();
-
-                    // Section 3: Plotting Configuration Options
+                    // Section 2: Plotting Configuration Options
                     ui.begin_layout(LayoutKind::Vert);
                     {
                         ui.label_fixed_width(
@@ -849,6 +913,28 @@ fn main() -> Result<(), Box<dyn Error>> {
                             (base_section_content_height + remaining_rows_for_last_section)
                                 .saturating_sub(lines_printed),
                         );
+                        for _ in 0..lines_to_fill {
+                            ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
+                        }
+                    }
+                    ui.end_layout();
+
+                    // Section 3: Dynamic Help / Keybinds
+                    ui.begin_layout(LayoutKind::Vert);
+                    {
+                        ui.label_fixed_width(
+                            "--- Help / Keybinds ---",
+                            right_panel_width,
+                            REGULAR_PAIR,
+                        );
+                        // Display help information
+                        for line in help_keybinds.iter() {
+                            ui.label_fixed_width(line, right_panel_width, REGULAR_PAIR);
+                        }
+                        // Fill remaining lines for this section's content
+                        let lines_printed = help_keybinds.len();
+                        let lines_to_fill =
+                            cmp::max(0, base_section_content_height.saturating_sub(lines_printed));
                         for _ in 0..lines_to_fill {
                             ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
                         }
@@ -991,7 +1077,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 if plot_lines { "ON" } else { "OFF" }
                             );
                         }
-                        // Toggle Polygons (using 'o' to avoid conflict with 'P' for points)
+                        // Toggle Polygons
                         111 | 79 => {
                             // 'o' as i32 | 'O' as i32
                             plot_polygons = !plot_polygons;
