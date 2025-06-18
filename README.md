@@ -75,24 +75,16 @@ Follow these steps to get the project running and generate your world map:
 
    This command will compile the project and then run the executable. The application will then list available GeoJSON files and prompt you to choose one to plot. Generated `.png` image files will be saved in the `output/` directory.
 
----
-
-## Dependencies
-
-The project relies on the following Rust crates (as defined in Cargo.toml):
-
-    `plotters = "0.3"`: A Rust drawing library for data plotting.
-    `proj = { version = "0.30.0" }`: Rust bindings for PROJ (a cartographic projections library).
-    `proj-sys = { version = "0.26.0" }`: System bindings for PROJ.
-    `approx = "0.5"`: A crate for approximate float comparisons (included, but not directly used in the current map drawing logic).
-    `geojson = "0.24"`: A library for working with GeoJSON data.
-    `serde_json = "1.0"`: A JSON serialization/deserialization library (a dependency of `geojson`).
-
----
-
 ## Data Source Acknowledgement
 
 The GeoJSON data used in this project is sourced from the Natural Earth project, specifically from the repository maintained by [nvkelso](https://github.com/nvkelso).
+
+---
+
+### FIXES
+
+- [ ] Scroll with circling back to first when reached the bottom of list.
+- [ ] Resize layout.
 
 # License
 

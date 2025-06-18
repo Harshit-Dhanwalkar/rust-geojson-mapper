@@ -1,248 +1,28 @@
-// main.rs for rust-geojson-mapper with ncurses TUI
+// main.rs
+use chrono;
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, MouseButton, MouseEventKind},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
 use geojson::{GeoJson, Value};
 use plotters::prelude::*;
-use std::collections::HashMap;
-use std::error::Error;
-use std::fs;
-use std::io::{self};
-use std::path::{Path, PathBuf};
-
-use ncurses::*;
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::cmp;
-use std::process;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::{
+    error::Error,
+    fs, io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
-static CTRLC: AtomicBool = AtomicBool::new(false);
+mod app;
+mod event;
+mod ui;
 
-extern "C" fn callback(_signum: i32) {
-    CTRLC.store(true, Ordering::Relaxed);
-}
-
-fn init_signal_handler() {
-    unsafe {
-        if libc::signal(libc::SIGINT, callback as libc::sighandler_t) == libc::SIG_ERR {
-            unreachable!()
-        }
-    }
-}
-
-fn poll_signal() -> bool {
-    CTRLC.swap(false, Ordering::Relaxed)
-}
-
-const REGULAR_PAIR: i16 = 0;
-const HIGHLIGHT_PAIR: i16 = 1;
-
-#[derive(Default, Copy, Clone)]
-struct Vec2 {
-    x: i32,
-    y: i32,
-}
-
-impl std::ops::Add for Vec2 {
-    type Output = Vec2;
-
-    fn add(self, rhs: Vec2) -> Vec2 {
-        Vec2 {
-            x: self.x + rhs.x,
-            y: self.y + rhs.y,
-        }
-    }
-}
-
-impl std::ops::Mul for Vec2 {
-    type Output = Vec2;
-
-    fn mul(self, rhs: Vec2) -> Vec2 {
-        Vec2 {
-            x: self.x * rhs.x,
-            y: self.y * rhs.y,
-        }
-    }
-}
-
-impl Vec2 {
-    fn new(x: i32, y: i32) -> Self {
-        Self { x, y }
-    }
-}
-
-enum LayoutKind {
-    Vert,
-    Horz,
-}
-
-struct Layout {
-    kind: LayoutKind,
-    pos: Vec2,
-    size: Vec2,
-}
-
-impl Layout {
-    fn available_pos(&self) -> Vec2 {
-        use LayoutKind::*;
-        match self.kind {
-            Horz => self.pos + self.size * Vec2::new(1, 0),
-            Vert => self.pos + self.size * Vec2::new(0, 1),
-        }
-    }
-
-    fn add_widget(&mut self, size: Vec2) {
-        use LayoutKind::*;
-        match self.kind {
-            Horz => {
-                self.size.x += size.x;
-                self.size.y = cmp::max(self.size.y, size.y);
-            }
-            Vert => {
-                self.size.x = cmp::max(self.size.x, size.x);
-                self.size.y += size.y;
-            }
-        }
-    }
-}
-
-#[derive(Default)]
-struct Ui {
-    layouts: Vec<Layout>,
-    key: Option<i32>,
-}
-
-impl Ui {
-    fn begin(&mut self, pos: Vec2, kind: LayoutKind) {
-        assert!(self.layouts.is_empty());
-        self.layouts.push(Layout {
-            kind,
-            pos,
-            size: Vec2::new(0, 0),
-        })
-    }
-
-    fn begin_layout(&mut self, kind: LayoutKind) {
-        let layout = self
-            .layouts
-            .last()
-            .expect("Can't create a layout outside of Ui::begin() and Ui::end()");
-        let pos = layout.available_pos();
-        self.layouts.push(Layout {
-            kind,
-            pos,
-            size: Vec2::new(0, 0),
-        });
-    }
-
-    fn end_layout(&mut self) {
-        let layout = self
-            .layouts
-            .pop()
-            .expect("Unbalanced Ui::begin_layout() and Ui::end_layout() calls.");
-        self.layouts
-            .last_mut()
-            .expect("Unbalanced Ui::begin_layout() and Ui::end_layout() calls.")
-            .add_widget(layout.size);
-    }
-
-    fn label_fixed_width(&mut self, text: &str, width: i32, pair: i16) {
-        let layout = self
-            .layouts
-            .last_mut()
-            .expect("Trying to render label outside of any layout");
-        let pos = layout.available_pos();
-
-        mv(pos.y, pos.x);
-        attron(COLOR_PAIR(pair));
-        addstr(text);
-        attroff(COLOR_PAIR(pair));
-
-        layout.add_widget(Vec2::new(width, 1));
-    }
-
-    fn edit_field(
-        &mut self,
-        buffer: &mut String,
-        cursor: &mut usize,
-        width: i32,
-        key_pressed: Option<i32>,
-    ) {
-        let layout = self
-            .layouts
-            .last_mut()
-            .expect("Trying to render edit field outside of any layout");
-        let pos = layout.available_pos();
-
-        if *cursor > buffer.len() {
-            *cursor = buffer.len();
-        }
-
-        if let Some(key) = key_pressed {
-            match key {
-                32..=126 => {
-                    // Printable ASCII characters
-                    if *cursor >= buffer.len() {
-                        buffer.push(key as u8 as char);
-                    } else {
-                        buffer.insert(*cursor, key as u8 as char);
-                    }
-                    *cursor += 1;
-                }
-                constants::KEY_LEFT => {
-                    if *cursor > 0 {
-                        *cursor -= 1
-                    }
-                }
-                constants::KEY_RIGHT => {
-                    if *cursor < buffer.len() {
-                        *cursor += 1;
-                    }
-                }
-                constants::KEY_BACKSPACE => {
-                    if *cursor > 0 {
-                        *cursor -= 1;
-                        if *cursor < buffer.len() {
-                            buffer.remove(*cursor);
-                        }
-                    }
-                }
-                constants::KEY_DC => {
-                    // Delete key
-                    if *cursor < buffer.len() {
-                        buffer.remove(*cursor);
-                    }
-                }
-                _ => {
-                    // Do not consume other keys like Enter, Escape, which will be handled by the main loop
-                }
-            }
-        }
-
-        // Buffer
-        {
-            mv(pos.y, pos.x);
-            attron(COLOR_PAIR(REGULAR_PAIR));
-            addstr(buffer);
-            for _ in buffer.len() as i32..width {
-                addch(' ' as chtype);
-            }
-            attroff(COLOR_PAIR(REGULAR_PAIR));
-            layout.add_widget(Vec2::new(width, 1));
-        }
-
-        // Cursor
-        {
-            mv(pos.y, pos.x + *cursor as i32);
-            attron(COLOR_PAIR(HIGHLIGHT_PAIR));
-            addstr(buffer.get(*cursor..=*cursor).unwrap_or(" "));
-            attroff(COLOR_PAIR(HIGHLIGHT_PAIR));
-        }
-    }
-
-    fn end(&mut self) {
-        self.layouts
-            .pop()
-            .expect("Unbalanced Ui::begin() and Ui::end() calls.");
-    }
-}
+use app::{App, AppMode, CurrentScreen, GeoJsonInfo, TerminalEvent};
+use event::{Event, EventHandler};
 
 const GEOJSON_DIR: &str = "data/geojson/";
 const OUTPUT_DIR: &str = "output/";
@@ -254,27 +34,10 @@ fn read_geojson(filepath: &str) -> Result<GeoJson, Box<dyn Error>> {
     Ok(geojson)
 }
 
-#[derive(Default, Clone)]
-struct GeoJsonInfo {
-    file_size_kb: u64,
-    modified_time: String,
-    feature_count: usize,
-    geometry_counts: HashMap<String, usize>,
-    bbox: Option<[f64; 4]>, // [min_lon, min_lat, max_lon, max_lat]
-    parse_error: Option<String>,
-}
-
-#[derive(PartialEq)]
-enum AppMode {
-    Navigation,
-    EditingFilename,
-    Searching,
-}
-
 // Basic fuzzy matching function
 fn fuzzy_match(pattern: &str, text: &str) -> bool {
     if pattern.is_empty() {
-        return true; // Empty pattern matches everything
+        return true;
     }
 
     let pattern_lower = pattern.to_lowercase(); // Case-insensitive search
@@ -300,307 +63,123 @@ fn fuzzy_match(pattern: &str, text: &str) -> bool {
     true
 }
 
-// Displays a startup screen
-fn display_startup_screen() {
-    let mut max_y = 0;
-    let mut max_x = 0;
-    getmaxyx(stdscr(), &mut max_y, &mut max_x);
-
-    erase(); // Clear the screen
-    curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor
-    noecho(); // Don't echo input characters
-    cbreak(); // Line buffering disabled, pass on every key
-
-    // Define ASCII art and messages
-    let ascii_art = vec![
-        r" /$$$$$$$$ /$$   /$$ /$$$$$$",
-        r"|__  $$__/| $$  | $$|_  $$_/",
-        r"   | $$   | $$  | $$  | $$  ",
-        r"   | $$   | $$  | $$  | $$  ",
-        r"   | $$   | $$  | $$  | $$  ",
-        r"   | $$   | $$  | $$  | $$  ",
-        r"   | $$   |  $$$$$$/ /$$$$$$",
-        r"   |__/    \______/ |______/",
-        r"  /$$$$$$                         /$$$$$  /$$$$$$   /$$$$$$  /$$   /$$",
-        r" /$$__  $$                       |__  $$ /$$__  $$ /$$__  $$| $$$ | $$",
-        r"| $$  \__/  /$$$$$$   /$$$$$$       | $$| $$  \__/| $$  \ $$| $$$$| $$",
-        r"| $$ /$$$$ /$$__  $$ /$$__  $$      | $$|  $$$$$$ | $$  | $$| $$ $$ $$",
-        r"| $$|_  $$| $$$$$$$$| $$  \ $$ /$$  | $$ \____  $$| $$  | $$| $$  $$$$",
-        r"| $$  \ $$| $$_____/| $$  | $$| $$  | $$ /$$  \ $$| $$  | $$| $$\  $$$",
-        r"|  $$$$$$/|  $$$$$$$|  $$$$$$/|  $$$$$$/|  $$$$$$/|  $$$$$$/| $$ \  $$",
-        r" \______/  \_______/ \______/  \______/  \______/  \______/ |__/  \__/",
-        r" /$$      /$$                                                  ",
-        r"| $$$    /$$$                                                  ",
-        r"| $$$$  /$$$$  /$$$$$$   /$$$$$$   /$$$$$$   /$$$$$$   /$$$$$$ ",
-        r"| $$ $$/$$ $$ |____  $$ /$$__  $$ /$$__  $$ /$$__  $$ /$$__  $$",
-        r"| $$  $$$| $$  /$$$$$$$| $$  \ $$| $$  \ $$| $$$$$$$$| $$  \__/",
-        r"| $$\  $ | $$ /$$__  $$| $$  | $$| $$  | $$| $$_____/| $$      ",
-        r"| $$ \/  | $$|  $$$$$$$| $$$$$$$/| $$$$$$$/|  $$$$$$$| $$      ",
-        r"|__/     |__/ \_______/| $$____/ | $$____/  \_______/|__/      ",
-        r"                       | $$      | $$                          ",
-        r"                       | $$      | $$                          ",
-        r"                       |__/      |__/                          ",
-    ];
-    let title = "TUI GeoJSON Mapper";
-    let author = "Developed by Harshit-Dhanwalkar";
-    let project = "https://github.com/Harshit-Dhanwalkar/rust-geojson-mapper/";
-    let instructions = "Press any key to continue...";
-
-    let ascii_art_height = ascii_art.len() as i32;
-    let longest_ascii_line_len = ascii_art.iter().map(|s| s.len()).max().unwrap_or(0) as i32;
-    let mut current_y = max_y / 2 - ascii_art_height / 2 - 8;
-    for line in ascii_art {
-        let line_len = line.len() as i32;
-        let x_pos = (max_x - line_len) / 2;
-        mvprintw(current_y, x_pos, line);
-        current_y += 1;
-    }
-    current_y += 1;
-
-    let title_len = title.len() as i32;
-    let author_len = author.len() as i32;
-    let project_len = project.len() as i32;
-    let instructions_len = instructions.len() as i32;
-
-    let title_x = (max_x - title_len) / 2;
-    mvprintw(current_y, title_x, title);
-    current_y += 2;
-
-    let author_x = (max_x - author_len) / 2;
-    mvprintw(current_y, author_x, author);
-    current_y += 1;
-
-    let project_x = (max_x - project_len) / 2;
-    mvprintw(current_y, project_x, project);
-    current_y += 2;
-
-    let instructions_x = (max_x - instructions_len) / 2;
-    mvprintw(current_y, instructions_x, instructions);
-
-    refresh();
-    getch(); // Blocks until a key is pressed
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    init_signal_handler();
-
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Ensure output directory exists
     fs::create_dir_all(OUTPUT_DIR)?;
 
-    // --- ncurses TUI Setup ---
-    initscr(); // Initialize ncurses
-    start_color(); // Enable color
-    init_pair(REGULAR_PAIR, COLOR_WHITE, COLOR_BLACK);
-    init_pair(HIGHLIGHT_PAIR, COLOR_BLACK, COLOR_WHITE);
+    // --- Terminal Setup ---
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
 
-    // Display the startup screen
-    display_startup_screen();
+    // --- Initialize Application State ---
+    let mut app = App::new();
 
-    // After startup screen, set up for main application loop
-    noecho(); // Don't echo input characters
-    keypad(stdscr(), true); // Enable keypad for arrow keys, etc.
-    timeout(16); // ~60 FPS update rate for getch()
-    curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor for main app
-
-    let mut geojson_files: Vec<String> = Vec::new();
+    // Load GeoJSON file names
+    let mut geojson_files_loaded: Vec<String> = Vec::new();
     let path = Path::new(GEOJSON_DIR);
 
-    if !path.exists() {
+    if !path.exists() || !path.is_dir() {
         eprintln!(
-            "Error: GeoJSON data directory not found at '{}'. Please ensure the 'natural-earth-vector-master' submodule is initialized and up-to-date.",
+            "Error: GeoJSON data directory not found or not a directory at '{}'.",
             GEOJSON_DIR
         );
-        process::exit(1);
-    }
-    if !path.is_dir() {
-        eprintln!("Error: Path '{}' is not a directory.", GEOJSON_DIR);
-        process::exit(1);
-    }
-
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let entry_path = entry.path();
-        if entry_path.is_file() {
-            if let Some(extension) = entry_path.extension() {
-                if extension == "geojson" {
-                    if let Some(file_name) = entry_path.file_name() {
-                        if let Some(name_str) = file_name.to_str() {
-                            geojson_files.push(name_str.to_string());
+        // Fallback or exit if data is critical
+    } else {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if entry_path.is_file() {
+                if let Some(extension) = entry_path.extension() {
+                    if extension == "geojson" {
+                        if let Some(file_name) = entry_path.file_name() {
+                            if let Some(name_str) = file_name.to_str() {
+                                geojson_files_loaded.push(name_str.to_string());
+                            }
                         }
                     }
                 }
             }
         }
+        geojson_files_loaded.sort(); // Sort alphabetically
     }
 
-    if geojson_files.is_empty() {
-        eprintln!(
-            "No .geojson files found in '{}'. Please ensure your GeoJSON data is correctly placed.",
-            GEOJSON_DIR
-        );
-        process::exit(1);
+    if geojson_files_loaded.is_empty() {
+        app.notification =
+            String::from("No .geojson files found in data/geojson/. Please add some.");
     }
 
-    geojson_files.sort(); // Sort alphabetically
+    app.setup_geojson_data(geojson_files_loaded);
 
-    // Define a palette of colors for plotting
-    let plot_colors = [
-        RGBColor(0, 0, 0),     // Black
-        RGBColor(255, 0, 0),   // Red
-        RGBColor(0, 255, 0),   // Green
-        RGBColor(0, 0, 255),   // Blue
-        RGBColor(255, 255, 0), // Yellow
-        RGBColor(255, 0, 255), // Magenta
-        RGBColor(0, 255, 255), // Cyan
-    ];
+    // --- Initialize Event Handler ---
+    let tick_rate = Duration::from_millis(250);
+    let event_handler = EventHandler::new(tick_rate);
 
-    let mut ui = Ui::default();
-    let mut selected_file_index: usize = 0;
-    let mut scroll_offset: usize = 0;
-    let mut quit = false;
-    let mut notification = String::from("Select GeoJSON files to plot:");
-
-    // Plotting options state
-    let mut plot_points = true;
-    let mut plot_lines = true;
-    let mut plot_polygons = true;
-
-    let mut selected_files_status: Vec<bool> = vec![false; geojson_files.len()];
-    let mut assigned_plot_colors: Vec<Option<RGBColor>> = vec![None; geojson_files.len()];
-    let mut current_color_index_for_assignment = 0; // Index for cycling colors when selecting files
-
-    // Output filename state
-    let mut output_filename_buffer = String::from("combined_plot.png");
-    let mut output_filename_cursor: usize = 0;
-    let mut previous_output_filename_buffer = String::new(); // To revert on Escape
-
-    let mut current_mode = AppMode::Navigation; // Initial mode
-
-    // Fuzzy search state
-    let mut search_query_buffer = String::new();
-    let mut search_query_cursor: usize = 0;
-    let mut filtered_geojson_indices: Vec<usize> = (0..geojson_files.len()).collect(); // All files initially
-    let mut previous_search_query_buffer = String::new(); // To revert on Escape
-
-    let mut help_keybinds = vec![
-        "J/K or Arrow Keys: Navigate file list",
-        "Space: Toggle file selection",
-        "Enter: Plot selected files",
-        "C: Cycle next assignment color",
-        "R: Rename output plot",
-        "/: Start fuzzy search",
-        "P: Toggle Points visibility",
-        "L: Toggle Lines visibility",
-        "O: Toggle Polygons visibility",
-        "Q: Quit the application",
-    ];
-
-    // Caching for GeoJSON metadata
-    let mut cached_geojson_info: Vec<Option<GeoJsonInfo>> = vec![None; geojson_files.len()];
-    let mut previous_selected_file_index_in_filtered: usize = selected_file_index;
-
-    // Main TUI Loop
-    while !quit && !poll_signal() {
-        erase(); // Clear screen
-
-        let mut x = 0;
-        let mut y = 0;
-        getmaxyx(stdscr(), &mut y, &mut x); // Get current terminal dimensions
+    // --- Main TUI Loop ---
+    let mut quit_app = false; // Separate flag to break main loop for plotting
+    while !quit_app {
+        // --- Pre-rendering state updates ---
 
         // Re-filter files if search query changed or just entered/exited search mode
-        if current_mode == AppMode::Searching
-            || search_query_buffer.ne(&previous_search_query_buffer)
+        // Also ensure selected_file_index is within bounds of filtered_geojson_indices
+        let prev_search_query = app.previous_search_query_buffer.clone();
+        if app.current_mode == AppMode::Searching || app.search_query_buffer.ne(&prev_search_query)
         {
-            filtered_geojson_indices.clear();
-            if search_query_buffer.is_empty() {
-                for i in 0..geojson_files.len() {
-                    filtered_geojson_indices.push(i);
+            app.filtered_geojson_indices.clear();
+            if app.search_query_buffer.is_empty() {
+                for i in 0..app.geojson_files.len() {
+                    app.filtered_geojson_indices.push(i);
                 }
             } else {
-                for (i, filename) in geojson_files.iter().enumerate() {
-                    if fuzzy_match(&search_query_buffer, filename) {
-                        filtered_geojson_indices.push(i);
+                for (i, filename) in app.geojson_files.iter().enumerate() {
+                    if fuzzy_match(&app.search_query_buffer, filename) {
+                        app.filtered_geojson_indices.push(i);
                     }
                 }
             }
-            // Reset selected index if the current one is no longer in the filtered list
-            if filtered_geojson_indices.is_empty() {
-                selected_file_index = 0;
-            } else if selected_file_index >= filtered_geojson_indices.len() {
-                selected_file_index = filtered_geojson_indices.len() - 1;
+            if app.filtered_geojson_indices.is_empty() {
+                app.selected_file_index = 0;
+            } else {
+                app.selected_file_index = cmp::min(
+                    app.selected_file_index,
+                    app.filtered_geojson_indices.len().saturating_sub(1),
+                );
             }
-            previous_search_query_buffer.clone_from(&search_query_buffer);
+            app.previous_search_query_buffer
+                .clone_from(&app.search_query_buffer);
         }
-
-        // If not in search mode and a search was active, reset notification
-        if current_mode != AppMode::Searching
-            && !search_query_buffer.is_empty()
-            && notification.starts_with("Searching for")
-        {
-            notification = String::from("Select GeoJSON files to plot:");
-        }
-
-        let mut header_rows = 2; // Notification + spacer
-        if let AppMode::Searching = current_mode {
-            header_rows += 1;
-        }
-        let footer_rows = 0;
-        let title_row = 1;
-        let fixed_ui_rows = header_rows + footer_rows + title_row;
-
-        let max_visible_items_in_list = cmp::max(0, y - fixed_ui_rows) as usize;
 
         // Adjust scroll_offset to keep selected_file_index in view
-        let current_list_len = filtered_geojson_indices.len();
-        if selected_file_index >= current_list_len {
-            selected_file_index = cmp::max(0, current_list_len.saturating_sub(1));
-        }
-
-        if selected_file_index >= scroll_offset + max_visible_items_in_list
+        let current_list_len = app.filtered_geojson_indices.len();
+        let max_visible_items_in_list = terminal.size()?.height.saturating_sub(5) as usize; // Estimate max visible
+        if app.selected_file_index >= app.scroll_offset + max_visible_items_in_list
             && max_visible_items_in_list > 0
         {
-            scroll_offset = selected_file_index - max_visible_items_in_list + 1;
+            app.scroll_offset = app.selected_file_index - max_visible_items_in_list + 1;
         }
-        if selected_file_index < scroll_offset {
-            scroll_offset = selected_file_index;
+        if app.selected_file_index < app.scroll_offset {
+            app.scroll_offset = app.selected_file_index;
         }
         if current_list_len <= max_visible_items_in_list {
-            scroll_offset = 0; // All files fit, no scrolling needed
-        } else if scroll_offset > current_list_len.saturating_sub(max_visible_items_in_list) {
-            scroll_offset = current_list_len.saturating_sub(max_visible_items_in_list);
+            app.scroll_offset = 0; // All files fit, no scrolling needed
+        } else if app.scroll_offset > current_list_len.saturating_sub(max_visible_items_in_list) {
+            app.scroll_offset = current_list_len.saturating_sub(max_visible_items_in_list);
         }
 
-        let main_content_width = x; // Total width for the main content area
-        let left_panel_width = main_content_width / 2;
-        let right_panel_width = main_content_width - left_panel_width; // Right panel takes remaining width
-
-        let available_content_rows = max_visible_items_in_list + 1; // +1 for "Available GeoJSON files:" title
-
-        let section_title_rows = 1;
-        let num_right_sections = 3;
-        let total_right_section_title_rows = section_title_rows * num_right_sections;
-
-        let mut base_section_content_height = 0;
-        if available_content_rows > total_right_section_title_rows {
-            base_section_content_height =
-                (available_content_rows - total_right_section_title_rows) / num_right_sections;
-        }
-        let remaining_rows_for_last_section =
-            (available_content_rows - total_right_section_title_rows) % num_right_sections;
-
-        // --- File Information & Metadata Retrieval (Cached) ---
-        let current_original_file_index = if filtered_geojson_indices.is_empty() {
-            0 // Or use a value indicating no file selected
+        // --- Cache GeoJSON Info for selected file ---
+        let current_original_file_index = if app.filtered_geojson_indices.is_empty() {
+            0
         } else {
-            filtered_geojson_indices[selected_file_index]
+            app.filtered_geojson_indices[app.selected_file_index]
         };
 
-        let current_geojson_info: GeoJsonInfo;
-        if current_original_file_index != previous_selected_file_index_in_filtered
-            || cached_geojson_info[current_original_file_index].is_none()
+        if current_original_file_index != app.previous_selected_file_index_in_filtered
+            || app.cached_geojson_info[current_original_file_index].is_none()
         {
-            // Load and process only if index changed or not cached yet
             let mut info = GeoJsonInfo::default();
-            if let Some(chosen_filename_str) = geojson_files.get(current_original_file_index) {
+            if let Some(chosen_filename_str) = app.geojson_files.get(current_original_file_index) {
                 let full_filepath = PathBuf::from(GEOJSON_DIR).join(chosen_filename_str);
                 if let Ok(metadata) = fs::metadata(&full_filepath) {
                     info.file_size_kb = metadata.len() / 1024;
@@ -664,7 +243,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                                 Value::Polygon(polygon) => {
                                     for ring in polygon {
-                                        // Each ring (exterior and interior)
                                         for c in ring {
                                             min_lon = min_lon.min(c[0]);
                                             min_lat = min_lat.min(c[1]);
@@ -685,8 +263,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     }
                                 }
-                                _ => { /* Ignore GeometryCollection or unknown types for BBox for now */
-                                }
+                                _ => {}
                             }
                         };
 
@@ -706,14 +283,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             GeoJson::Geometry(geometry) => {
-                                // Handle case where root is just a geometry, treat as one feature
                                 info.feature_count = 1;
                                 process_geometry_for_info(&geometry);
                             }
                         }
 
                         if info.feature_count > 0 && min_lon != f64::MAX {
-                            // Check if bounding box was actually calculated
                             info.bbox = Some([min_lon, min_lat, max_lon, max_lat]);
                         }
                     }
@@ -724,466 +299,353 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 info.parse_error = Some(String::from("Info: No file selected"));
             }
-            cached_geojson_info[current_original_file_index] = Some(info.clone()); // Store in cache
-            current_geojson_info = info; // Return the newly loaded info
-        } else {
-            current_geojson_info = cached_geojson_info[current_original_file_index]
-                .as_ref()
-                .unwrap()
-                .clone(); // Get from cache
+            app.cached_geojson_info[current_original_file_index] = Some(info);
+            app.previous_selected_file_index_in_filtered = current_original_file_index;
         }
 
-        let mut file_info_lines: Vec<String> = Vec::new();
-        file_info_lines.push(format!("Size: {} KB", current_geojson_info.file_size_kb));
-        file_info_lines.push(format!("Modified: {}", current_geojson_info.modified_time));
-        file_info_lines.push(format!("Features: {}", current_geojson_info.feature_count));
-        for (geom_type, count) in &current_geojson_info.geometry_counts {
-            file_info_lines.push(format!("  {}: {}", geom_type, count));
-        }
-        if let Some(bbox) = current_geojson_info.bbox {
-            file_info_lines.push(format!(
-                "BBox: [{:.2},{:.2},{:.2},{:.2}]",
-                bbox[0], bbox[1], bbox[2], bbox[3]
-            ));
-        } else {
-            file_info_lines.push(String::from("BBox: Not applicable/Found"));
-        }
-        if let Some(ref error) = current_geojson_info.parse_error {
-            file_info_lines.push(error.clone());
-        }
+        // --- Draw UI ---
+        terminal.draw(|f| ui::render(f, &mut app))?;
 
-        ui.begin(Vec2::new(0, 0), LayoutKind::Vert);
-        {
-            ui.label_fixed_width(&notification, x, REGULAR_PAIR);
-            ui.label_fixed_width("", x, REGULAR_PAIR); // Spacer
+        // --- Handle Events ---
+        if let Some(event) = event_handler.next(tick_rate)? {
+            match event {
+                Event::Input(key_event) => {
+                    app.notification.clear(); // Clear notification on new input
 
-            // Render search bar if in search mode
-            if let AppMode::Searching = current_mode {
-                ui.begin_layout(LayoutKind::Horz);
-                {
-                    ui.label_fixed_width("Search:", 8, REGULAR_PAIR);
-                    ui.edit_field(
-                        &mut search_query_buffer,
-                        &mut search_query_cursor,
-                        x - 8,
-                        ui.key,
-                    );
-                }
-                ui.end_layout();
-            }
-
-            ui.begin_layout(LayoutKind::Horz); // Start Horizontal split for main content
-            {
-                // --- Left Panel: GeoJSON File List ---
-                ui.begin_layout(LayoutKind::Vert);
-                {
-                    ui.label_fixed_width(
-                        "Available GeoJSON files:",
-                        left_panel_width,
-                        REGULAR_PAIR,
-                    );
-                    // Display visible file list items from filtered_geojson_indices
-                    let end_display_index = cmp::min(
-                        scroll_offset + max_visible_items_in_list,
-                        filtered_geojson_indices.len(),
-                    );
-                    for i in scroll_offset..end_display_index {
-                        let original_index = filtered_geojson_indices[i];
-                        let file_name = &geojson_files[original_index];
-                        let selection_indicator = if selected_files_status[original_index] {
-                            "[x]"
-                        } else {
-                            "[ ]"
-                        };
-                        let display_text = format!(
-                            "{} {}. {}",
-                            selection_indicator,
-                            original_index + 1,
-                            file_name
-                        );
-                        let pair = if i == selected_file_index {
-                            HIGHLIGHT_PAIR
-                        } else {
-                            REGULAR_PAIR
-                        };
-                        ui.label_fixed_width(&display_text, left_panel_width, pair);
-                    }
-                    // Fill remaining lines with empty spaces if there are fewer files than max_visible_items
-                    for _ in (end_display_index - scroll_offset)..max_visible_items_in_list {
-                        ui.label_fixed_width("", left_panel_width, REGULAR_PAIR);
-                    }
-                }
-                ui.end_layout(); // End Left Panel
-
-                // --- Right Panel: Three Vertical Sections ---
-                ui.begin_layout(LayoutKind::Vert);
-                {
-                    // Section 1: Detailed File Information
-                    ui.begin_layout(LayoutKind::Vert);
-                    {
-                        ui.label_fixed_width(
-                            "--- File Information ---",
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-                        for line in file_info_lines.iter() {
-                            ui.label_fixed_width(line, right_panel_width, REGULAR_PAIR);
-                        }
-                        // Fill remaining lines for this section's content
-                        let lines_printed = file_info_lines.len();
-                        let lines_to_fill =
-                            cmp::max(0, base_section_content_height.saturating_sub(lines_printed));
-                        for _ in 0..lines_to_fill {
-                            ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
-                        }
-                    }
-                    ui.end_layout();
-
-                    // Section 2: Plotting Configuration Options
-                    ui.begin_layout(LayoutKind::Vert);
-                    {
-                        ui.label_fixed_width(
-                            "--- Plotting Options ---",
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-                        let next_plot_color = &plot_colors[current_color_index_for_assignment];
-                        ui.label_fixed_width(
-                            &format!(
-                                "Next Color to Assign: R{} G{} B{}",
-                                next_plot_color.0, next_plot_color.1, next_plot_color.2
-                            ),
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-
-                        // Start a horizontal layout for the filename label and field
-                        ui.begin_layout(LayoutKind::Horz);
-                        {
-                            let filename_label_width = 20; // Fixed width for the label
-                            ui.label_fixed_width(
-                                "Output Filename:",
-                                filename_label_width,
-                                REGULAR_PAIR,
-                            );
-
-                            let remaining_width_for_field =
-                                right_panel_width - filename_label_width;
-
-                            if let AppMode::EditingFilename = current_mode {
-                                ui.edit_field(
-                                    &mut output_filename_buffer,
-                                    &mut output_filename_cursor,
-                                    remaining_width_for_field - 2, // -2 for padding or cursor space
-                                    ui.key,
-                                );
-                            } else {
-                                ui.label_fixed_width(
-                                    &output_filename_buffer,
-                                    remaining_width_for_field,
-                                    REGULAR_PAIR,
-                                );
-                            }
-                        }
-                        ui.end_layout(); // End horizontal layout for filename
-
-                        // Display visibility toggles
-                        ui.label_fixed_width(
-                            &format!("Points Visible: {}", if plot_points { "Yes" } else { "No" }),
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-                        ui.label_fixed_width(
-                            &format!("Lines Visible: {}", if plot_lines { "Yes" } else { "No" }),
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-                        ui.label_fixed_width(
-                            &format!(
-                                "Polygons Visible: {}",
-                                if plot_polygons { "Yes" } else { "No" }
-                            ),
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-                        // Fill remaining lines for this section's content
-                        let lines_printed = 4;
-                        let lines_to_fill = cmp::max(
-                            0,
-                            (base_section_content_height + remaining_rows_for_last_section)
-                                .saturating_sub(lines_printed),
-                        );
-                        for _ in 0..lines_to_fill {
-                            ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
-                        }
-                    }
-                    ui.end_layout();
-
-                    // Section 3: Dynamic Help / Keybinds
-                    ui.begin_layout(LayoutKind::Vert);
-                    {
-                        ui.label_fixed_width(
-                            "--- Help / Keybinds ---",
-                            right_panel_width,
-                            REGULAR_PAIR,
-                        );
-                        // Display help information
-                        for line in help_keybinds.iter() {
-                            ui.label_fixed_width(line, right_panel_width, REGULAR_PAIR);
-                        }
-                        // Fill remaining lines for this section's content
-                        let lines_printed = help_keybinds.len();
-                        let lines_to_fill =
-                            cmp::max(0, base_section_content_height.saturating_sub(lines_printed));
-                        for _ in 0..lines_to_fill {
-                            ui.label_fixed_width("", right_panel_width, REGULAR_PAIR);
-                        }
-                    }
-                    ui.end_layout();
-                }
-                ui.end_layout(); // End Right Panel
-            }
-            ui.end_layout(); // End Horizontal split for main content
-
-            ui.label_fixed_width("", x, REGULAR_PAIR); // Spacer
-        }
-        ui.end();
-
-        refresh(); // Update screen
-
-        let key = getch(); // Get user input
-        ui.key = Some(key); // Pass the raw key to ui.edit_field if in editing mode
-
-        if key != ERR {
-            notification.clear(); // Clear notification on new input
-
-            match current_mode {
-                AppMode::Navigation => {
-                    match key {
-                        // Navigation
-                        constants::KEY_DOWN => {
-                            if selected_file_index + 1 < filtered_geojson_indices.len() {
-                                selected_file_index += 1;
-                            }
-                        }
-                        // Use ASCII value for 'j'
-                        106 => {
-                            // 'j' as i32
-                            if selected_file_index + 1 < filtered_geojson_indices.len() {
-                                selected_file_index += 1;
-                            }
-                        }
-                        constants::KEY_UP => {
-                            if selected_file_index > 0 {
-                                selected_file_index -= 1;
-                            }
-                        }
-                        // Use ASCII value for 'k'
-                        107 => {
-                            // 'k' as i32
-                            if selected_file_index > 0 {
-                                selected_file_index -= 1;
-                            }
-                        }
-                        // Toggle file selection
-                        32 => {
-                            // ' ' as i32 (space)
-                            if !filtered_geojson_indices.is_empty() {
-                                let original_index = filtered_geojson_indices[selected_file_index];
-                                selected_files_status[original_index] =
-                                    !selected_files_status[original_index];
-                                if selected_files_status[original_index] {
-                                    assigned_plot_colors[original_index] =
-                                        Some(plot_colors[current_color_index_for_assignment]);
-                                    notification = format!(
-                                        "Selected: {} (Color: R{} G{} B{})",
-                                        geojson_files[original_index],
-                                        plot_colors[current_color_index_for_assignment].0,
-                                        plot_colors[current_color_index_for_assignment].1,
-                                        plot_colors[current_color_index_for_assignment].2
-                                    );
-                                    current_color_index_for_assignment =
-                                        (current_color_index_for_assignment + 1)
-                                            % plot_colors.len();
-                                } else {
-                                    assigned_plot_colors[original_index] = None;
-                                    notification =
-                                        format!("Deselected: {}", geojson_files[original_index]);
+                    match app.current_mode {
+                        AppMode::Navigation => {
+                            match key_event.code {
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    if app.selected_file_index + 1
+                                        < app.filtered_geojson_indices.len()
+                                    {
+                                        app.selected_file_index += 1;
+                                    }
                                 }
-                            } else {
-                                notification = String::from("No files to select in current view.");
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    if app.selected_file_index > 0 {
+                                        app.selected_file_index -= 1;
+                                    }
+                                }
+                                KeyCode::Char(' ') => {
+                                    // Space
+                                    if !app.filtered_geojson_indices.is_empty() {
+                                        let original_index =
+                                            app.filtered_geojson_indices[app.selected_file_index];
+                                        app.selected_files_status[original_index] =
+                                            !app.selected_files_status[original_index];
+                                        if app.selected_files_status[original_index] {
+                                            app.assigned_plot_colors[original_index] = Some(
+                                                app.plot_colors
+                                                    [app.current_color_index_for_assignment],
+                                            );
+                                            app.notification = format!(
+                                                "Selected: {} (Color: R{} G{} B{})",
+                                                app.geojson_files[original_index],
+                                                app.plot_colors
+                                                    [app.current_color_index_for_assignment]
+                                                    .0,
+                                                app.plot_colors
+                                                    [app.current_color_index_for_assignment]
+                                                    .1,
+                                                app.plot_colors
+                                                    [app.current_color_index_for_assignment]
+                                                    .2
+                                            );
+                                            app.current_color_index_for_assignment =
+                                                (app.current_color_index_for_assignment + 1)
+                                                    % app.plot_colors.len();
+                                        } else {
+                                            app.assigned_plot_colors[original_index] = None;
+                                            app.notification = format!(
+                                                "Deselected: {}",
+                                                app.geojson_files[original_index]
+                                            );
+                                        }
+                                    } else {
+                                        app.notification =
+                                            String::from("No files to select in current view.");
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    let num_selected =
+                                        app.selected_files_status.iter().filter(|&&s| s).count();
+                                    if num_selected > 0 {
+                                        quit_app = true; // Exit loop to process selection
+                                        app.notification =
+                                            format!("Plotting {} selected files...", num_selected);
+                                    } else {
+                                        app.notification = String::from(
+                                            "No files selected to plot. Use Space to select.",
+                                        );
+                                    }
+                                }
+                                KeyCode::Char('c') | KeyCode::Char('C') => {
+                                    app.current_color_index_for_assignment =
+                                        (app.current_color_index_for_assignment + 1)
+                                            % app.plot_colors.len();
+                                    app.notification = format!(
+                                        "Next assignment color set to R{} G{} B{}",
+                                        app.plot_colors[app.current_color_index_for_assignment].0,
+                                        app.plot_colors[app.current_color_index_for_assignment].1,
+                                        app.plot_colors[app.current_color_index_for_assignment].2
+                                    );
+                                }
+                                KeyCode::Char('r') | KeyCode::Char('R') => {
+                                    app.current_mode = AppMode::EditingFilename;
+                                    app.previous_output_filename_buffer
+                                        .clone_from(&app.output_filename_buffer);
+                                    app.notification = String::from(
+                                        "Editing filename. Press Enter to confirm, Escape to cancel.",
+                                    );
+                                }
+                                KeyCode::Char('/') => {
+                                    app.current_mode = AppMode::Searching;
+                                    app.previous_search_query_buffer
+                                        .clone_from(&app.search_query_buffer);
+                                    app.notification = String::from(
+                                        "Enter search query. Press Enter to apply, Escape to cancel.",
+                                    );
+                                }
+                                KeyCode::Char('p') | KeyCode::Char('P') => {
+                                    app.plot_points = !app.plot_points;
+                                    app.notification = format!(
+                                        "Points visibility: {}",
+                                        if app.plot_points { "ON" } else { "OFF" }
+                                    );
+                                }
+                                KeyCode::Char('l') | KeyCode::Char('L') => {
+                                    app.plot_lines = !app.plot_lines;
+                                    app.notification = format!(
+                                        "Lines visibility: {}",
+                                        if app.plot_lines { "ON" } else { "OFF" }
+                                    );
+                                }
+                                KeyCode::Char('o') | KeyCode::Char('O') => {
+                                    app.plot_polygons = !app.plot_polygons;
+                                    app.notification = format!(
+                                        "Polygons visibility: {}",
+                                        if app.plot_polygons { "ON" } else { "OFF" }
+                                    );
+                                }
+                                KeyCode::Char('q') | KeyCode::Char('Q') => {
+                                    quit_app = true;
+                                    app.notification = String::from("Exiting...");
+                                }
+                                KeyCode::Char('h') | KeyCode::Char('H') => {
+                                    app.current_screen = CurrentScreen::Help;
+                                    app.notification = String::from("Showing Help screen.");
+                                }
+                                KeyCode::Char('t') | KeyCode::Char('T') => {
+                                    // Changed from 'r' to 't' to avoid conflict
+                                    app.current_screen = CurrentScreen::ResizableLayout;
+                                    app.notification =
+                                        String::from("Switched to Resizable Layout (Test).");
+                                }
+                                _ => {
+                                    // app.notification = format!("Unknown key: {:?}", key_event.code); // for debugging
+                                }
                             }
                         }
-                        // Plot selected files
-                        constants::KEY_ENTER | 10 => {
-                            // 10 is '\n' as i32
-                            let num_selected = selected_files_status.iter().filter(|&&s| s).count();
-                            if num_selected > 0 {
-                                quit = true; // Exit loop to process selection
-                                notification =
-                                    format!("Plotting {} selected files...", num_selected);
-                            } else {
-                                notification =
-                                    String::from("No files selected to plot. Use Space to select.");
+                        AppMode::EditingFilename => {
+                            match key_event.code {
+                                KeyCode::Enter => {
+                                    if app.output_filename_buffer.is_empty() {
+                                        app.notification =
+                                            String::from("Filename cannot be empty. Reverted.");
+                                        app.output_filename_buffer
+                                            .clone_from(&app.previous_output_filename_buffer);
+                                    } else if !app.output_filename_buffer.ends_with(".png")
+                                        && !app.output_filename_buffer.ends_with(".jpg")
+                                        && !app.output_filename_buffer.ends_with(".jpeg")
+                                        && !app.output_filename_buffer.ends_with(".bmp")
+                                    {
+                                        app.notification = String::from(
+                                            "Filename must end with .png, .jpg, .jpeg, or .bmp. Reverted.",
+                                        );
+                                        app.output_filename_buffer
+                                            .clone_from(&app.previous_output_filename_buffer);
+                                    } else {
+                                        app.notification = format!(
+                                            "Output filename set to: {}",
+                                            app.output_filename_buffer
+                                        );
+                                    }
+                                    app.current_mode = AppMode::Navigation;
+                                }
+                                KeyCode::Esc => {
+                                    // Escape key
+                                    app.output_filename_buffer
+                                        .clone_from(&app.previous_output_filename_buffer);
+                                    app.notification = String::from(
+                                        "Filename editing cancelled. Reverted to previous.",
+                                    );
+                                    app.current_mode = AppMode::Navigation;
+                                }
+                                KeyCode::Backspace => {
+                                    if app.output_filename_cursor > 0 {
+                                        app.output_filename_cursor -= 1;
+                                        if app.output_filename_cursor
+                                            < app.output_filename_buffer.len()
+                                        {
+                                            app.output_filename_buffer
+                                                .remove(app.output_filename_cursor);
+                                        }
+                                    }
+                                }
+                                KeyCode::Delete => {
+                                    if app.output_filename_cursor < app.output_filename_buffer.len()
+                                    {
+                                        app.output_filename_buffer
+                                            .remove(app.output_filename_cursor);
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if app.output_filename_cursor > 0 {
+                                        app.output_filename_cursor -= 1;
+                                    }
+                                }
+                                KeyCode::Right => {
+                                    if app.output_filename_cursor < app.output_filename_buffer.len()
+                                    {
+                                        app.output_filename_cursor += 1;
+                                    }
+                                }
+                                KeyCode::Char(c) => {
+                                    if app.output_filename_cursor
+                                        >= app.output_filename_buffer.len()
+                                    {
+                                        app.output_filename_buffer.push(c);
+                                    } else {
+                                        app.output_filename_buffer
+                                            .insert(app.output_filename_cursor, c);
+                                    }
+                                    app.output_filename_cursor += 1;
+                                }
+                                _ => {}
                             }
                         }
-                        // Cycle next assignment color
-                        99 | 67 => {
-                            // 'c' as i32 | 'C' as i32
-                            current_color_index_for_assignment =
-                                (current_color_index_for_assignment + 1) % plot_colors.len();
-                            notification = format!(
-                                "Next assignment color set to R{} G{} B{}",
-                                plot_colors[current_color_index_for_assignment].0,
-                                plot_colors[current_color_index_for_assignment].1,
-                                plot_colors[current_color_index_for_assignment].2
-                            );
-                        }
-                        // Rename output plot
-                        114 | 82 => {
-                            // 'r' as i32 | 'R' as i32
-                            current_mode = AppMode::EditingFilename;
-                            previous_output_filename_buffer.clone_from(&output_filename_buffer);
-                            notification = String::from(
-                                "Editing filename. Press Enter to confirm, Escape to cancel.",
-                            );
-                            curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE); // Show cursor
-                        }
-                        // Start fuzzy search
-                        47 => {
-                            // '/' as i32
-                            current_mode = AppMode::Searching;
-                            previous_search_query_buffer.clone_from(&search_query_buffer); // Save current for potential revert
-                            notification = String::from(
-                                "Enter search query. Press Enter to apply, Escape to cancel.",
-                            );
-                            curs_set(CURSOR_VISIBILITY::CURSOR_VISIBLE); // Show cursor
-                        }
-                        // Toggle Points
-                        112 | 80 => {
-                            // 'p' as i32 | 'P' as i32
-                            plot_points = !plot_points;
-                            notification = format!(
-                                "Points visibility: {}",
-                                if plot_points { "ON" } else { "OFF" }
-                            );
-                        }
-                        // Toggle Lines
-                        108 | 76 => {
-                            // 'l' as i32 | 'L' as i32
-                            plot_lines = !plot_lines;
-                            notification = format!(
-                                "Lines visibility: {}",
-                                if plot_lines { "ON" } else { "OFF" }
-                            );
-                        }
-                        // Toggle Polygons
-                        111 | 79 => {
-                            // 'o' as i32 | 'O' as i32
-                            plot_polygons = !plot_polygons;
-                            notification = format!(
-                                "Polygons visibility: {}",
-                                if plot_polygons { "ON" } else { "OFF" }
-                            );
-                        }
-                        // Quit
-                        113 => {
-                            // 'q' as i32
-                            quit = true;
-                            notification = String::from("Exiting...");
-                        }
-                        _ => {
-                            // Handle other keys or do nothing
-                            notification = format!("Unknown key: {}", key);
+                        AppMode::Searching => {
+                            match key_event.code {
+                                KeyCode::Enter => {
+                                    if app.search_query_buffer.is_empty() {
+                                        app.notification =
+                                            String::from("Search cleared. Showing all files.");
+                                    } else {
+                                        app.notification = format!(
+                                            "Searching for: '{}' ({} results)",
+                                            app.search_query_buffer,
+                                            app.filtered_geojson_indices.len()
+                                        );
+                                    }
+                                    app.current_mode = AppMode::Navigation;
+                                }
+                                KeyCode::Esc => {
+                                    // Escape key
+                                    app.search_query_buffer
+                                        .clone_from(&app.previous_search_query_buffer);
+                                    app.current_mode = AppMode::Navigation;
+                                    app.notification =
+                                        String::from("Search cancelled. Showing all files.");
+                                }
+                                KeyCode::Backspace => {
+                                    if app.search_query_cursor > 0 {
+                                        app.search_query_cursor -= 1;
+                                        if app.search_query_cursor < app.search_query_buffer.len() {
+                                            app.search_query_buffer.remove(app.search_query_cursor);
+                                        }
+                                    }
+                                }
+                                KeyCode::Delete => {
+                                    if app.search_query_cursor < app.search_query_buffer.len() {
+                                        app.search_query_buffer.remove(app.search_query_cursor);
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if app.search_query_cursor > 0 {
+                                        app.search_query_cursor -= 1;
+                                    }
+                                }
+                                KeyCode::Right => {
+                                    if app.search_query_cursor < app.search_query_buffer.len() {
+                                        app.search_query_cursor += 1;
+                                    }
+                                }
+                                KeyCode::Char(c) => {
+                                    if app.search_query_cursor >= app.search_query_buffer.len() {
+                                        app.search_query_buffer.push(c);
+                                    } else {
+                                        app.search_query_buffer.insert(app.search_query_cursor, c);
+                                    }
+                                    app.search_query_cursor += 1;
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
-                AppMode::EditingFilename => {
-                    match key {
-                        constants::KEY_ENTER | 10 => {
-                            // 10 is '\n' as i32
-                            if output_filename_buffer.is_empty() {
-                                notification = String::from("Filename cannot be empty. Reverted.");
-                                output_filename_buffer.clone_from(&previous_output_filename_buffer);
-                            } else if !output_filename_buffer.ends_with(".png")
-                                && !output_filename_buffer.ends_with(".jpg")
-                                && !output_filename_buffer.ends_with(".jpeg")
-                                && !output_filename_buffer.ends_with(".bmp")
-                            {
-                                notification = String::from(
-                                    "Filename must end with .png, .jpg, .jpeg, or .bmp. Reverted.",
-                                );
-                                output_filename_buffer.clone_from(&previous_output_filename_buffer);
-                            } else {
-                                notification =
-                                    format!("Output filename set to: {}", output_filename_buffer);
-                            }
-                            current_mode = AppMode::Navigation;
-                            curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor
-                        }
-                        constants::KEY_EXIT | constants::KEY_CANCEL | 27 => {
-                            // 27 is ASCII for ESC
-                            output_filename_buffer.clone_from(&previous_output_filename_buffer);
-                            notification =
-                                String::from("Filename editing cancelled. Reverted to previous.");
-                            current_mode = AppMode::Navigation;
-                            curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor
-                        }
-                        _ => {}
-                    }
+                Event::TerminalEvent(TerminalEvent::Resize) => {
+                    // ratatui handles resize redrawing automatically
                 }
-                AppMode::Searching => {
-                    match key {
-                        constants::KEY_ENTER | 10 => {
-                            // 10 is '\n' as i32
-                            if search_query_buffer.is_empty() {
-                                notification = String::from("Search cleared. Showing all files.");
-                            } else {
-                                notification = format!(
-                                    "Searching for: '{}' ({} results)",
-                                    search_query_buffer,
-                                    filtered_geojson_indices.len()
-                                );
+                Event::Tick => {
+                    // Periodic updates
+                }
+                Event::Mouse(mouse_event) => {
+                    if app.current_screen == CurrentScreen::ResizableLayout {
+                        // Only process resize for resizable layout screen
+                        match mouse_event.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                let terminal_width = terminal.size()?.width;
+                                let divider_col = (terminal_width as f64
+                                    * (app.left_pane_width_percentage as f64 / 100.0))
+                                    as u16;
+
+                                if mouse_event.column >= divider_col.saturating_sub(1)
+                                    && mouse_event.column <= divider_col.saturating_add(1)
+                                {
+                                    app.is_resizing = true;
+                                }
                             }
-                            current_mode = AppMode::Navigation;
-                            curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor
-                        }
-                        constants::KEY_EXIT | constants::KEY_CANCEL | 27 => {
-                            // 27 is ASCII for ESC
-                            search_query_buffer.clone_from(&previous_search_query_buffer); // Revert search query
-                            // Re-filter immediately to show original list if query was cleared
-                            filtered_geojson_indices.clear();
-                            for i in 0..geojson_files.len() {
-                                filtered_geojson_indices.push(i);
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                if app.is_resizing {
+                                    let terminal_width = terminal.size()?.width;
+                                    if terminal_width > 0 {
+                                        let new_width_percent = (mouse_event.column as f64
+                                            / terminal_width as f64)
+                                            * 100.0;
+                                        app.left_pane_width_percentage =
+                                            (new_width_percent.round() as u16).clamp(10, 90);
+                                    }
+                                }
                             }
-                            selected_file_index = 0; // Reset selection to top of the (now full) list
-                            notification = String::from("Search cancelled. Showing all files.");
-                            current_mode = AppMode::Navigation;
-                            curs_set(CURSOR_VISIBILITY::CURSOR_INVISIBLE); // Hide cursor
-                        }
-                        _ => {
-                            // `edit_field` handles text input, so no other direct key handling needed here for input.
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                app.is_resizing = false;
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
         }
-        previous_selected_file_index_in_filtered = current_original_file_index; // Update previous index after handling input
     }
 
-    // --- Plotting Logic (after selection) ---
-    endwin(); // End ncurses mode before plotting
+    // --- Plotting Logic ---
+    execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
 
-    let files_to_plot: Vec<(usize, &String)> = geojson_files
+    let files_to_plot: Vec<(usize, &String)> = app
+        .geojson_files
         .iter()
         .enumerate()
-        .filter(|(i, _)| selected_files_status[*i])
+        .filter(|(i, _)| app.selected_files_status[*i])
         .collect();
 
     if files_to_plot.is_empty() {
         println!("No files selected for plotting. Exited without generating a plot.");
-    } else if !CTRLC.load(Ordering::Relaxed) {
-        let output_filename = PathBuf::from(OUTPUT_DIR).join(&output_filename_buffer);
+    } else {
+        let output_filename = PathBuf::from(OUTPUT_DIR).join(&app.output_filename_buffer);
 
         // --- Calculate combined BBox for selected files ---
         let mut overall_min_lon = f64::MAX;
@@ -1193,7 +655,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut bbox_found = false;
 
         for (file_idx, _) in &files_to_plot {
-            if let Some(info) = &cached_geojson_info[*file_idx] {
+            if let Some(info) = &app.cached_geojson_info[*file_idx] {
                 if let Some(bbox) = info.bbox {
                     overall_min_lon = overall_min_lon.min(bbox[0]);
                     overall_min_lat = overall_min_lat.min(bbox[1]);
@@ -1259,7 +721,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         for (file_idx, chosen_filename_str) in files_to_plot {
             let full_filepath = PathBuf::from(GEOJSON_DIR).join(chosen_filename_str);
-            let plot_color_for_file = assigned_plot_colors[file_idx].unwrap_or_else(|| {
+            let plot_color_for_file = app.assigned_plot_colors[file_idx].unwrap_or_else(|| {
                 // Fallback to black if for some reason color wasn't assigned
                 RGBColor(0, 0, 0)
             });
@@ -1364,9 +826,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     draw_geometry(
                                         geometry,
                                         &plot_color_for_file,
-                                        plot_points,
-                                        plot_lines,
-                                        plot_polygons,
+                                        app.plot_points,
+                                        app.plot_lines,
+                                        app.plot_polygons,
                                     )?;
                                 }
                             }
@@ -1376,9 +838,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 draw_geometry(
                                     geometry,
                                     &plot_color_for_file,
-                                    plot_points,
-                                    plot_lines,
-                                    plot_polygons,
+                                    app.plot_points,
+                                    app.plot_lines,
+                                    app.plot_polygons,
                                 )?;
                             }
                         }
@@ -1386,9 +848,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             draw_geometry(
                                 geometry,
                                 &plot_color_for_file,
-                                plot_points,
-                                plot_lines,
-                                plot_polygons,
+                                app.plot_points,
+                                app.plot_lines,
+                                app.plot_polygons,
                             )?;
                         }
                     }
@@ -1403,8 +865,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         root.present()?;
         println!("Combined plot generated to {}", output_filename.display());
-    } else {
-        println!("Exited without plotting.");
     }
 
     Ok(())
