@@ -19,8 +19,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.current_screen {
         CurrentScreen::Main => render_main_screen(frame, app, main_layout[0]),
         CurrentScreen::Help => render_help_screen(frame, app, main_layout[0]),
-        CurrentScreen::ResizableLayout => render_resizable_layout(frame, app, main_layout[0]),
-        CurrentScreen::GeoJsonMapper => render_geojson_mapper_ui(frame, app, main_layout[0]),
+        CurrentScreen::GeoJsonMapper => render_geojson_mapper_ui(frame, app, main_layout[0]), // GeoJSON Mapper is now the main screen
     }
 
     // Render the footer, common across all screens
@@ -30,17 +29,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 /// Renders the main application screen
 fn render_main_screen(frame: &mut Frame, _app: &mut App, area: ratatui::layout::Rect) {
     let block = Block::default()
-        .title(" RUST GEOJSON MAPPER TUI")
+        .title(" Rust GeoJson Mapper TUI")
         .title_style(Style::default().fg(Color::Cyan).bold())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta));
 
     let content = Paragraph::new(format!(
-        "Current counter: {}\n\n\
-        Press 'q' to quit (or return to main screen).\n\
-        Press 'h' for help.\n\
-        Press 't' for resizable layout (test).",
-        0
+        "Welcome to the GeoJSON Mapper TUI!\n\n\
+        This is the main application screen.\n\n\
+        The GeoJSON Mapper UI is now the default view.\n\
+        Press 'q' to quit (or return to this screen from Help).\n\
+        Press 'h' for help."
     ))
     .block(block)
     .wrap(Wrap { trim: false })
@@ -59,13 +58,18 @@ fn render_help_screen(frame: &mut Frame, _app: &mut App, area: ratatui::layout::
 
     let help_text = Paragraph::new(
         "Keybinds:\n\
-          J/K or ↑ ↓: Navigate \n\
-          Q / q     : Quit application / Go back to Main screen\n\
-          H / h     : Show this Help screen\n\
-          T / t     : Show Resizable Layout screen\n\
-          T / t     : Resize GeoJSON Mapper UI layout\n\
-          C / c     : Change plot color \n\
-          Enter     : Select",
+          J/K or ↑/↓: Navigate file list\n\
+          Space: Toggle file selection\n\
+          Enter: Plot selected files\n\
+          C: Cycle next assignment color\n\
+          R: Rename output plot\n\
+          /: Start fuzzy search\n\
+          P: Toggle Points visibility\n\
+          L: Toggle Lines visibility\n\
+          O: Toggle Polygons visibility\n\
+          Q: Quit the application\n\
+          H: Show this Help screen\n\n\
+          Click & Drag Divider: Resize panels in GeoJSON Mapper UI.",
     )
     .block(block)
     .wrap(Wrap { trim: false })
@@ -74,66 +78,16 @@ fn render_help_screen(frame: &mut Frame, _app: &mut App, area: ratatui::layout::
     frame.render_widget(help_text, area);
 }
 
-/// Renders a resizable two-pane layout
-fn render_resizable_layout(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    let layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(app.left_pane_width_percentage),
-            Constraint::Percentage(100 - app.left_pane_width_percentage),
-        ])
-        .split(area);
-
-    let left_block = Block::default()
-        .title(" Left Pane ")
-        .title_style(Style::default().fg(Color::Green).bold())
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
-    let left_content = Paragraph::new(format!(
-        "This is the left pane.\n\nWidth: {}%",
-        app.left_pane_width_percentage
-    ))
-    .block(left_block)
-    .wrap(Wrap { trim: false });
-    frame.render_widget(left_content, layout[0]);
-
-    let right_block = Block::default()
-        .title(" Right Pane ")
-        .title_style(Style::default().fg(Color::Blue).bold())
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Blue));
-    let right_content = Paragraph::new(format!(
-        "This is the right pane.\n\nWidth: {}%",
-        100 - app.left_pane_width_percentage
-    ))
-    .block(right_block)
-    .wrap(Wrap { trim: false });
-    frame.render_widget(right_content, layout[1]);
-
-    let divider_x_pos = layout[0].x + layout[0].width;
-    for y in layout[0].y..(layout[0].y + layout[0].height) {
-        let style = if app.is_resizing {
-            Style::default().bg(Color::LightRed)
-        } else {
-            Style::default().bg(Color::DarkGray)
-        };
-        frame
-            .buffer_mut()
-            .get_mut(divider_x_pos, y)
-            .set_symbol("│")
-            .set_style(style);
-    }
-}
-
-/// Renders the new GeoJSON Mapper UI.
+// Renders the GeoJSON Mapper UI
 fn render_geojson_mapper_ui(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    // Main vertical layout: Notification/Search, then Main Content, then Spacer
     let main_layout_constraints = if app.current_mode == AppMode::Searching {
         vec![
             Constraint::Length(1), // Notification
-            Constraint::Length(1), // Spacer (still useful here for top separation)
+            Constraint::Length(1), // Spacer
             Constraint::Length(1), // Search bar
             Constraint::Min(0),    // Main content area
-            Constraint::Length(1), // Spacer (still useful for bottom separation)
+            Constraint::Length(1), // Spacer
         ]
     } else {
         vec![
@@ -175,13 +129,11 @@ fn render_geojson_mapper_ui(frame: &mut Frame, app: &mut App, area: ratatui::lay
         let search_label = Paragraph::new("Search:").style(Style::default().fg(Color::LightCyan));
         frame.render_widget(search_label, search_layout[0]);
 
-        // No borders for search input, as the main block already has them
         let search_input_paragraph = Paragraph::new(app.search_query_buffer.clone())
             .style(Style::default().fg(Color::Yellow));
 
         frame.render_widget(search_input_paragraph, search_layout[1]);
 
-        // Manually draw cursor for search input
         if app.current_mode == AppMode::Searching {
             frame.set_cursor(
                 search_layout[1].x + app.search_query_cursor as u16,
@@ -196,8 +148,8 @@ fn render_geojson_mapper_ui(frame: &mut Frame, app: &mut App, area: ratatui::lay
     let main_content_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(50), // Left Panel
-            Constraint::Percentage(50), // Right Panel
+            Constraint::Percentage(app.left_pane_width_percentage), // Dynamically sized left pane
+            Constraint::Percentage(100 - app.left_pane_width_percentage), // Dynamically sized right pane
         ])
         .split(main_content_area);
 
@@ -314,7 +266,6 @@ fn render_geojson_mapper_ui(frame: &mut Frame, app: &mut App, area: ratatui::lay
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::LightYellow));
 
-    // Inner layout for plotting options: Next Color, Toggles, Spacer, Output Filename
     let inner_plotting_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -399,15 +350,6 @@ fn render_geojson_mapper_ui(frame: &mut Frame, app: &mut App, area: ratatui::lay
         },
     );
     frame.render_widget(filename_input_paragraph, output_filename_layout[1]);
-
-    // Manually draw cursor for filename input
-    if app.current_mode == AppMode::EditingFilename {
-        frame.set_cursor(
-            output_filename_layout[1].x + app.output_filename_cursor as u16,
-            output_filename_layout[1].y,
-        );
-    }
-
     frame.render_widget(plotting_options_block, right_panel_chunks[1]);
 
     // Section 3: Dynamic Help / Keybinds
@@ -425,6 +367,21 @@ fn render_geojson_mapper_ui(frame: &mut Frame, app: &mut App, area: ratatui::lay
         .block(help_block)
         .wrap(Wrap { trim: false });
     frame.render_widget(help_paragraph, right_panel_chunks[2]);
+
+    // divider for resizing the main panels
+    let divider_x_pos = main_content_layout[0].x + main_content_layout[0].width;
+    for y in main_content_layout[0].y..(main_content_layout[0].y + main_content_layout[0].height) {
+        let style = if app.is_resizing {
+            Style::default().bg(Color::LightRed)
+        } else {
+            Style::default().bg(Color::DarkGray)
+        };
+        frame
+            .buffer_mut()
+            .get_mut(divider_x_pos, y)
+            .set_symbol("│")
+            .set_style(style);
+    }
 }
 
 /// Renders a common footer area.
@@ -432,7 +389,6 @@ fn render_footer(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) 
     let current_screen_name = match app.current_screen {
         CurrentScreen::Main => "Main",
         CurrentScreen::Help => "Help",
-        CurrentScreen::ResizableLayout => "Resizable Layout",
         CurrentScreen::GeoJsonMapper => "GeoJSON Mapper",
     };
 
@@ -471,14 +427,6 @@ fn render_footer(frame: &mut Frame, app: &mut App, area: ratatui::layout::Rect) 
                 .fg(Color::Green),
         ),
         Span::raw(" for Help "),
-        Span::raw(" | Press "),
-        Span::styled(
-            "t",
-            Style::default()
-                .add_modifier(Modifier::BOLD)
-                .fg(Color::White),
-        ),
-        Span::raw(" for Resizable Layout"),
     ]);
 
     let block = Block::default()

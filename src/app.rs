@@ -7,7 +7,6 @@ use std::collections::HashMap; // For plot colors
 pub enum CurrentScreen {
     Main,
     Help,
-    ResizableLayout,
     GeoJsonMapper,
 }
 
@@ -34,7 +33,6 @@ pub struct GeoJsonInfo {
     pub parse_error: Option<String>,
 }
 
-/// `App` holds the state of the application.
 pub struct App {
     pub current_screen: CurrentScreen,
     pub current_mode: AppMode, // Current operational mode of the TUI
@@ -74,16 +72,16 @@ pub struct App {
     // Plotting colors
     pub plot_colors: [RGBColor; 7],
 
-    // Resizing
-    pub left_pane_width_percentage: u16,
-    pub is_resizing: bool,
+    // Resizing for main GeoJSON Mapper UI
+    pub left_pane_width_percentage: u16, // Width of the left (file list) pane
+    pub is_resizing: bool,               // True when actively dragging the divider
 }
 
 impl App {
     /// Constructs a new `App` with initial states.
     pub fn new() -> App {
         App {
-            current_screen: CurrentScreen::GeoJsonMapper,
+            current_screen: CurrentScreen::GeoJsonMapper, // Start directly in the GeoJSON Mapper UI
             current_mode: AppMode::Navigation,
 
             geojson_files: Vec::new(),
@@ -121,8 +119,8 @@ impl App {
                 "L: Toggle Lines visibility".to_string(),
                 "O: Toggle Polygons visibility".to_string(),
                 "Q: Quit the application".to_string(),
-                "H: Switch to Help screen".to_string(),
-                "T: Switch to Resizable Layout (Test) ".to_string(),
+                "H: Show Help screen".to_string(),
+                "Click & Drag Divider: Resize panels".to_string(),
             ],
 
             plot_colors: [
@@ -135,7 +133,7 @@ impl App {
                 RGBColor(0, 255, 255), // Cyan
             ],
 
-            left_pane_width_percentage: 50,
+            left_pane_width_percentage: 50, // Default 50% width for left pane
             is_resizing: false,
         }
     }

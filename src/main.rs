@@ -27,6 +27,7 @@ use event::{Event, EventHandler};
 const GEOJSON_DIR: &str = "data/geojson/";
 const OUTPUT_DIR: &str = "output/";
 
+// Helper function to read GeoJSON
 fn read_geojson(filepath: &str) -> Result<GeoJson, Box<dyn Error>> {
     let file = fs::File::open(filepath)?;
     let reader = io::BufReader::new(file);
@@ -40,8 +41,8 @@ fn fuzzy_match(pattern: &str, text: &str) -> bool {
         return true;
     }
 
-    let pattern_lower = pattern.to_lowercase(); // Case-insensitive search
-    let text_lower = text.to_lowercase(); // Case-insensitive search
+    let pattern_lower = pattern.to_lowercase();
+    let text_lower = text.to_lowercase();
 
     let mut pattern_chars = pattern_lower.chars().peekable();
     let mut text_chars = text_lower.chars();
@@ -56,7 +57,7 @@ fn fuzzy_match(pattern: &str, text: &str) -> bool {
             }
         }
         if !found_char {
-            return false; // Character not found in sequence
+            return false;
         }
         current_pattern_char = pattern_chars.next();
     }
@@ -123,7 +124,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // --- Pre-rendering state updates ---
 
         // Re-filter files if search query changed or just entered/exited search mode
-        // Also ensure selected_file_index is within bounds of filtered_geojson_indices
         let prev_search_query = app.previous_search_query_buffer.clone();
         if app.current_mode == AppMode::Searching || app.search_query_buffer.ne(&prev_search_query)
         {
@@ -153,19 +153,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Adjust scroll_offset to keep selected_file_index in view
         let current_list_len = app.filtered_geojson_indices.len();
-        let max_visible_items_in_list = terminal.size()?.height.saturating_sub(5) as usize; // Estimate max visible
-        if app.selected_file_index >= app.scroll_offset + max_visible_items_in_list
-            && max_visible_items_in_list > 0
+        let estimated_max_visible_items = terminal.size()?.height.saturating_sub(5) as usize;
+        if app.selected_file_index >= app.scroll_offset + estimated_max_visible_items
+            && estimated_max_visible_items > 0
         {
-            app.scroll_offset = app.selected_file_index - max_visible_items_in_list + 1;
+            app.scroll_offset = app.selected_file_index - estimated_max_visible_items + 1;
         }
         if app.selected_file_index < app.scroll_offset {
             app.scroll_offset = app.selected_file_index;
         }
-        if current_list_len <= max_visible_items_in_list {
+        if current_list_len <= estimated_max_visible_items {
             app.scroll_offset = 0; // All files fit, no scrolling needed
-        } else if app.scroll_offset > current_list_len.saturating_sub(max_visible_items_in_list) {
-            app.scroll_offset = current_list_len.saturating_sub(max_visible_items_in_list);
+        } else if app.scroll_offset > current_list_len.saturating_sub(estimated_max_visible_items) {
+            app.scroll_offset = current_list_len.saturating_sub(estimated_max_visible_items);
         }
 
         // --- Cache GeoJSON Info for selected file ---
@@ -436,15 +436,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app.current_screen = CurrentScreen::Help;
                                     app.notification = String::from("Showing Help screen.");
                                 }
-                                KeyCode::Char('t') | KeyCode::Char('T') => {
-                                    // Changed from 'r' to 't' to avoid conflict
-                                    app.current_screen = CurrentScreen::ResizableLayout;
-                                    app.notification =
-                                        String::from("Switched to Resizable Layout (Test).");
-                                }
-                                _ => {
-                                    // app.notification = format!("Unknown key: {:?}", key_event.code); // for debugging
-                                }
+                                _ => { /* Ignore other key events */ }
                             }
                         }
                         AppMode::EditingFilename => {
@@ -591,15 +583,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Periodic updates
                 }
                 Event::Mouse(mouse_event) => {
-                    if app.current_screen == CurrentScreen::ResizableLayout {
-                        // Only process resize for resizable layout screen
+                    // Resizing logic GeoJsonMapper screen
+                    if app.current_screen == CurrentScreen::GeoJsonMapper {
+                        let terminal_width = terminal.size()?.width;
+                        // Calculate divider position based on current app.left_pane_width_percentage
+                        let divider_col = (terminal_width as f64
+                            * (app.left_pane_width_percentage as f64 / 100.0))
+                            as u16;
+
                         match mouse_event.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
-                                let terminal_width = terminal.size()?.width;
-                                let divider_col = (terminal_width as f64
-                                    * (app.left_pane_width_percentage as f64 / 100.0))
-                                    as u16;
-
+                                // Check if mouse click is near the divider (within a small range)
                                 if mouse_event.column >= divider_col.saturating_sub(1)
                                     && mouse_event.column <= divider_col.saturating_add(1)
                                 {
@@ -608,11 +602,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             MouseEventKind::Drag(MouseButton::Left) => {
                                 if app.is_resizing {
-                                    let terminal_width = terminal.size()?.width;
                                     if terminal_width > 0 {
                                         let new_width_percent = (mouse_event.column as f64
                                             / terminal_width as f64)
                                             * 100.0;
+                                        // Clamp to a reasonable range
                                         app.left_pane_width_percentage =
                                             (new_width_percent.round() as u16).clamp(10, 90);
                                     }
@@ -621,7 +615,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             MouseEventKind::Up(MouseButton::Left) => {
                                 app.is_resizing = false;
                             }
-                            _ => {}
+                            _ => {} // Ignore other mouse events
                         }
                     }
                 }
@@ -629,8 +623,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // --- Plotting Logic ---
-    execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    // --- Plotting Logic (after TUI loop exits via Enter) ---
+    execute!(terminal.backend_mut(), DisableMouseCapture)?; // Disable mouse capture here
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -706,7 +700,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let root = BitMapBackend::new(
             output_filename
                 .to_str()
-                .expect("Failed to convert output path to string"),
+                .expect("Failed to convert path to string"),
             (width, height),
         )
         .into_drawing_area();
